@@ -93,7 +93,6 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
     };
   }, [loadProfiles]);
 
-  // Keep a copy on this device so the conversation is there even offline.
   useEffect(() => {
     try {
       localStorage.setItem(LOCAL_KEY, JSON.stringify(messages.slice(-200)));
@@ -149,6 +148,8 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
     [messages, profiles, avatars, user.id],
   );
 
+  const inCall = call.status === "connected" || call.status === "calling";
+
   return (
     <div className="relative flex h-dvh flex-col">
       <Backdrop />
@@ -163,26 +164,34 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
             <Circle
               className={`h-2 w-2 ${online ? "fill-emerald-400 text-emerald-400" : "fill-muted-foreground text-muted-foreground"}`}
             />
-            {online ? "She is online" : "Waiting for her"}
+            {online
+              ? call.peerOnline === 1
+                ? "Online"
+                : `${call.peerOnline} online`
+              : "Waiting…"}
           </p>
         </div>
 
-        <button
-          type="button"
-          aria-label="Audio call"
-          onClick={() => void call.startCall(false).catch(() => toast.error("Microphone blocked"))}
-          className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
-        >
-          <Phone className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          aria-label="Video call"
-          onClick={() => void call.startCall(true).catch(() => toast.error("Camera blocked"))}
-          className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
-        >
-          <VideoIcon className="h-4 w-4" />
-        </button>
+        {!inCall && (
+          <>
+            <button
+              type="button"
+              aria-label="Audio call"
+              onClick={() => void call.startCall(false).catch(() => toast.error("Microphone blocked"))}
+              className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
+            >
+              <Phone className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              aria-label="Video call"
+              onClick={() => void call.startCall(true).catch(() => toast.error("Camera blocked"))}
+              className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
+            >
+              <VideoIcon className="h-4 w-4" />
+            </button>
+          </>
+        )}
         <button
           type="button"
           aria-label="Profile settings"
