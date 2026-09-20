@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { useRingtone } from "@/hooks/useRingtone";
 import type { useCall } from "@/lib/useCall";
 
 type Call = ReturnType<typeof useCall>;
@@ -91,44 +92,67 @@ function FloatingWidget({
 }
 
 export function CallPanel({ call }: { call: Call }) {
+  const ringtone = useRingtone();
+
+  useEffect(() => {
+    if (call.status === "calling") ringtone.play("outgoing");
+    else if (call.status === "incoming") ringtone.play("incoming");
+    else ringtone.stop();
+    return () => ringtone.stop();
+  }, [call.status, ringtone]);
+
   if (call.status === "idle") return null;
 
   if (call.status === "incoming") {
     return (
-      <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-5 backdrop-blur-sm">
-        <div className="glass-strong glow w-full max-w-sm rounded-3xl p-8 text-center">
-          <div className="gradient-romance mx-auto flex h-16 w-16 items-center justify-center rounded-2xl text-primary-foreground">
-            <Heart className="h-8 w-8" />
-          </div>
-          <h2 className="mt-4 text-xl font-semibold">Incoming call</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Someone wants to talk to you
-          </p>
-          <div className="mt-7 flex justify-center gap-4">
-            <button
-              type="button"
-              onClick={() => call.hangup()}
-              className="grid h-14 w-14 place-items-center rounded-full bg-destructive text-destructive-foreground"
-              aria-label="Decline"
-            >
-              <PhoneOff className="h-6 w-6" />
-            </button>
-            <button
-              type="button"
-              onClick={() => void call.accept(call.incomingFrom || "", call.withVideo)}
-              className="gradient-romance grid h-14 w-14 place-items-center rounded-full text-primary-foreground"
-              aria-label="Accept"
-            >
-              <PhoneIncoming className="h-6 w-6" />
-            </button>
+      <>
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-5 backdrop-blur-sm">
+          <div className="glass-strong glow w-full max-w-sm rounded-3xl p-8 text-center">
+            <div className="gradient-romance mx-auto flex h-16 w-16 items-center justify-center rounded-2xl text-primary-foreground">
+              <Heart className="h-8 w-8" />
+            </div>
+            <h2 className="mt-4 text-xl font-semibold">Incoming call</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Someone wants to talk to you
+            </p>
+            <div className="mt-7 flex justify-center gap-4">
+              <button
+                type="button"
+                onClick={() => {
+                  ringtone.stop();
+                  call.hangup();
+                }}
+                className="grid h-14 w-14 place-items-center rounded-full bg-destructive text-destructive-foreground"
+                aria-label="Decline"
+              >
+                <PhoneOff className="h-6 w-6" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  ringtone.stop();
+                  void call.accept(call.incomingFrom || "", call.withVideo);
+                }}
+                className="gradient-romance grid h-14 w-14 place-items-center rounded-full text-primary-foreground"
+                aria-label="Accept"
+              >
+                <PhoneIncoming className="h-6 w-6" />
+              </button>
+            </div>
           </div>
         </div>
-      </div>
+        <AudioPeers streams={call.remoteStreams} />
+      </>
     );
   }
 
   if (call.minimized) {
-    return <FloatingWidget call={call} onExpand={() => call.setMinimized(false)} />;
+    return (
+      <>
+        <FloatingWidget call={call} onExpand={() => call.setMinimized(false)} />
+        <AudioPeers streams={call.remoteStreams} />
+      </>
+    );
   }
 
   const peerCount = call.remoteStreams.size;
@@ -145,10 +169,13 @@ export function CallPanel({ call }: { call: Call }) {
             className="h-full w-full object-contain"
           />
         ) : (
-          <div className="grid h-full w-full gap-1 p-1" style={{
-            gridTemplateColumns: peerCount <= 2 ? "1fr" : "repeat(2, 1fr)",
-            gridTemplateRows: peerCount <= 4 ? "repeat(2, 1fr)" : "repeat(3, 1fr)",
-          }}>
+          <div
+            className="grid h-full w-full gap-1 p-1"
+            style={{
+              gridTemplateColumns: peerCount <= 2 ? "1fr" : "repeat(2, 1fr)",
+              gridTemplateRows: peerCount <= 4 ? "repeat(2, 1fr)" : "repeat(3, 1fr)",
+            }}
+          >
             {Array.from(call.remoteStreams.entries()).map(([id, stream]) => (
               <Stream
                 key={id}

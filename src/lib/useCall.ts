@@ -204,25 +204,41 @@ export function useCall(userId: string | null) {
 
   const shareScreen = useCallback(async () => {
     if (pcsRef.current.size === 0) return;
-    const display = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 60, max: 60 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-      audio: true,
-    });
-    screenRef.current = display;
-    const track = display.getVideoTracks()[0];
-    if (!track) return;
-    track.contentHint = "detail";
-    for (const [, pc] of pcsRef.current) {
-      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-      if (sender) {
-        await sender.replaceTrack(track).catch(() => {});
-        const params = sender.getParameters();
-        params.encodings = [{ maxBitrate: 6_000_000, maxFramerate: 60 }];
-        await sender.setParameters(params).catch(() => {});
+    try {
+      const display = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          frameRate: { ideal: 60, max: 60 },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          cursor: "always",
+        },
+        audio: false,
+      });
+      screenRef.current = display;
+      const track = display.getVideoTracks()[0];
+      if (!track) return;
+      track.contentHint = "detail";
+      for (const [, pc] of pcsRef.current) {
+        const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+        if (sender) {
+          await sender.replaceTrack(track).catch(() => {});
+          try {
+            const params = sender.getParameters();
+            params.encodings = [{ maxBitrate: 6_000_000, maxFramerate: 60 }];
+            await sender.setParameters(params).catch(() => {});
+          } catch {
+            /* param set not supported on some browsers */
+          }
+        } else {
+          pc.addTrack(track, display);
+        }
       }
+      setSharingScreen(true);
+      track.onended = () => void stopScreenShare();
+    } catch (err) {
+      console.error("Screen share failed:", err);
+      throw err;
     }
-    setSharingScreen(true);
-    track.onended = () => void stopScreenShare();
   }, [stopScreenShare]);
 
   const stopAudioShare = useCallback(async () => {

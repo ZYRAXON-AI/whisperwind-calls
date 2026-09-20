@@ -5,7 +5,7 @@ const cache = new Map<string, string>();
 export async function signedUrl(path: string): Promise<string> {
   const hit = cache.get(path);
   if (hit) return hit;
-  const { data } = await supabase.storage.from("media").createSignedUrl(path, 60 * 60 * 8);
+  const { data } = await supabase.storage.from("media").createSignedUrl(path, 60 * 60 * 24);
   const url = data?.signedUrl ?? "";
   if (url) cache.set(path, url);
   return url;
