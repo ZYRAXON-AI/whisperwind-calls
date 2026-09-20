@@ -22,6 +22,7 @@ export function useCall(userId: string | null) {
   const [peerOnline, setPeerOnline] = useState(0);
   const [minimized, setMinimized] = useState(false);
   const [incomingFrom, setIncomingFrom] = useState<string | null>(null);
+  const [incomingVideo, setIncomingVideo] = useState(false);
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
@@ -71,6 +72,7 @@ export function useCall(userId: string | null) {
     setCamOn(true);
     setMinimized(false);
     setIncomingFrom(null);
+    setIncomingVideo(false);
   }, []);
 
   const createPeerFor = useCallback(
@@ -131,28 +133,24 @@ export function useCall(userId: string | null) {
     return stream;
   }, []);
 
-  const joinRoom = useCallback(async (video?: boolean) => {
-    if (!userId) return;
-    if (!localRef.current) return;
-    send("join", { from: userId, video: video ?? withVideo });
-    setStatus("calling");
-  }, [send, userId, withVideo]);
-
   const startCall = useCallback(
     async (video: boolean) => {
       if (!userId) return;
       setWithVideo(video);
       await getLocal(video);
-      await joinRoom(video);
+      send("join", { from: userId, video });
+      setStatus("calling");
     },
-    [getLocal, joinRoom, userId],
+    [getLocal, send, userId],
   );
 
   const accept = useCallback(
     async (peerId: string, video: boolean) => {
       if (!userId) return;
       setWithVideo(video);
-      const stream = await getLocal(video);
+      await getLocal(video);
+      setStatus("connected");
+      setIncomingFrom(null);
       const pc = createPeerFor(peerId);
       const offer = pendingOffers.current.get(peerId);
       if (offer) {
@@ -161,15 +159,19 @@ export function useCall(userId: string | null) {
         const candidates = pendingIce.current.get(peerId) ?? [];
         for (const c of candidates) await pc.addIceCandidate(c).catch(() => {});
         pendingIce.current.delete(peerId);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        send("answer", { from: userId, to: peerId, sdp: answer });
       }
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      send("answer", { from: userId, to: peerId, sdp: answer });
-      setIncomingFrom(null);
-      setStatus("connected");
     },
     [createPeerFor, getLocal, send, userId],
   );
+
+  const reject = useCallback(() => {
+    if (incomingFrom) send("reject", { from: userId, to: incomingFrom });
+    setIncomingFrom(null);
+    setStatus("idle");
+  }, [send, userId, incomingFrom]);
 
   const hangup = useCallback(() => {
     send("hangup", { from: userId });
@@ -226,9 +228,7 @@ export function useCall(userId: string | null) {
             const params = sender.getParameters();
             params.encodings = [{ maxBitrate: 6_000_000, maxFramerate: 60 }];
             await sender.setParameters(params).catch(() => {});
-          } catch {
-            /* param set not supported on some browsers */
-          }
+          } catch { /* not supported */ }
         } else {
           pc.addTrack(track, display);
         }
@@ -284,21 +284,61 @@ export function useCall(userId: string | null) {
 
   useEffect(() => {
     if (!userId) return;
+
+    const getMuted = (): string[] => {
+      try {
+        return JSON.parse(localStorage.getItem("zyraxon-muted") || "[]");
+      } catch {
+        return [];
+      }
+    };
+
     const channel = supabase.channel("zyraxon-room", {
       config: { broadcast: { self: false }, presence: { key: userId } },
     });
     channelRef.current = channel;
 
     channel
+      .on("broadcast", { event: "join" }, ({ payload }) => {
+        if (payload.from === userId) return;
+        if (getMuted().includes(payload.from as string)) return;
+        const peerId = payload.from as string;
+        if (pcsRef.current.has(peerId)) return;
+        setWithVideo(Boolean(payload.video));
+        setIncomingVideo(Boolean(payload.video));
+        setIncomingFrom(peerId);
+        setStatus("incoming");
+      })
+      .on("broadcast", { event: "reject" }, ({ payload }) => {
+        if (payload.from === userId) return;
+        const peerId = payload.from as string;
+        const pc = pcsRef.current.get(peerId);
+        if (pc) { pc.close(); pcsRef.current.delete(peerId); }
+        setRemoteStreams((prev) => { const n = new Map(prev); n.delete(peerId); return n; });
+        if (pcsRef.current.size === 0) cleanup();
+      })
       .on("broadcast", { event: "offer" }, async ({ payload }) => {
         if (payload.from === userId) return;
         if (payload.to && payload.to !== userId) return;
+        if (getMuted().includes(payload.from as string)) return;
         const peerId = payload.from as string;
-        if (pcsRef.current.has(peerId)) return;
-        pendingOffers.current.set(peerId, payload.sdp);
-        setWithVideo(Boolean(payload.video));
-        setIncomingFrom(peerId);
-        setStatus("incoming");
+        const pc = pcsRef.current.get(peerId);
+        if (pc && !pc.remoteDescription) {
+          await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+          const candidates = pendingIce.current.get(peerId) ?? [];
+          for (const c of candidates) await pc.addIceCandidate(c).catch(() => {});
+          pendingIce.current.delete(peerId);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          send("answer", { from: userId, to: peerId, sdp: answer });
+          setStatus("connected");
+        } else if (!pc) {
+          pendingOffers.current.set(peerId, payload.sdp);
+          setWithVideo(Boolean(payload.video));
+          setIncomingVideo(Boolean(payload.video));
+          setIncomingFrom(peerId);
+          setStatus("incoming");
+        }
       })
       .on("broadcast", { event: "answer" }, async ({ payload }) => {
         if (payload.from === userId) return;
@@ -325,32 +365,12 @@ export function useCall(userId: string | null) {
         }
         await pc.addIceCandidate(payload.candidate).catch(() => {});
       })
-      .on("broadcast", { event: "join" }, async ({ payload }) => {
-        if (payload.from === userId) return;
-        const peerId = payload.from as string;
-        if (pcsRef.current.has(peerId)) return;
-        if (!localRef.current) {
-          await getLocal(Boolean(payload.video));
-        }
-        const pc = createPeerFor(peerId);
-        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
-        await pc.setLocalDescription(offer);
-        send("offer", { from: userId, to: peerId, sdp: offer, video: Boolean(payload.video) });
-        setStatus("connected");
-      })
       .on("broadcast", { event: "hangup" }, ({ payload }) => {
         if (payload.from === userId) return;
         const peerId = payload.from as string;
         const pc = pcsRef.current.get(peerId);
-        if (pc) {
-          pc.close();
-          pcsRef.current.delete(peerId);
-        }
-        setRemoteStreams((prev) => {
-          const next = new Map(prev);
-          next.delete(peerId);
-          return next;
-        });
+        if (pc) { pc.close(); pcsRef.current.delete(peerId); }
+        setRemoteStreams((prev) => { const n = new Map(prev); n.delete(peerId); return n; });
         if (pcsRef.current.size === 0) cleanup();
       })
       .on("presence", { event: "sync" }, () => {
@@ -365,29 +385,14 @@ export function useCall(userId: string | null) {
       supabase.removeChannel(channel);
       channelRef.current = null;
     };
-  }, [accept, cleanup, createPeerFor, getLocal, send, userId]);
+  }, [cleanup, createPeerFor, getLocal, send, userId]);
 
   return {
-    status,
-    withVideo,
-    micOn,
-    camOn,
-    sharingScreen,
-    sharingAudio,
-    peerOnline,
-    minimized,
-    incomingFrom,
-    localStream,
-    remoteStreams,
-    startCall,
-    accept,
-    hangup,
-    toggleMic,
-    toggleCam,
-    shareScreen,
-    stopScreenShare,
-    shareDeviceAudio,
-    stopAudioShare,
-    setMinimized,
+    status, withVideo, micOn, camOn, sharingScreen, sharingAudio,
+    peerOnline, minimized, incomingFrom, incomingVideo,
+    localStream, remoteStreams,
+    startCall, accept, reject, hangup,
+    toggleMic, toggleCam, shareScreen, stopScreenShare,
+    shareDeviceAudio, stopAudioShare, setMinimized,
   };
 }

@@ -1,44 +1,53 @@
 import { useEffect, useState } from "react";
 
-const FALLBACK = "/bg-aurora.jpg";
-
-const PHOTO_TOPICS = [
-  "romantic+night+sky",
-  "aurora+borealis",
-  "sunset+love",
-  "starry+night+romantic",
-  "pink+clouds+dreamy",
-  "ocean+sunset+romantic",
-  "lavender+field+ sunset",
-  "galaxy+stars+night",
-  "cherry+blossom+moon",
-  "aurora+mountain+lake",
+const PHOTOS = [
+  "https://images.unsplash.com/photo-1534796636912-3b95b3ab5986?w=1920&q=80",
+  "https://images.unsplash.com/photo-1507400492013-162706c8c05e?w=1920&q=80",
+  "https://images.unsplash.com/photo-1419242902214-272b3f66ee7a?w=1920&q=80",
+  "https://images.unsplash.com/photo-1519681393784-d120267933ba?w=1920&q=80",
+  "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=1920&q=80",
+  "https://images.unsplash.com/photo-1470252649378-9c29740c9fa8?w=1920&q=80",
 ];
 
-export function Backdrop({ variant = "aurora" }: { variant?: "aurora" | "silk" }) {
-  const [src, setSrc] = useState(FALLBACK);
+const GRADIENT =
+  "linear-gradient(135deg, #1a0a2e 0%, #16213e 30%, #0f3460 60%, #533483 100%)";
+
+export function Backdrop() {
+  const [loaded, setLoaded] = useState(false);
+  const [src, setSrc] = useState<string | null>(null);
 
   useEffect(() => {
-    const topic = PHOTO_TOPICS[Math.floor(Math.random() * PHOTO_TOPICS.length)];
+    const url = PHOTOS[Math.floor(Math.random() * PHOTOS.length)];
     const img = new Image();
-    const url = `https://source.unsplash.com/1920x1200/?${topic}`;
-    img.onload = () => setSrc(url);
-    img.onerror = () => setSrc(FALLBACK);
+    img.onload = () => {
+      setSrc(url);
+      setLoaded(true);
+    };
+    img.onerror = () => setLoaded(true);
     img.src = url;
   }, []);
 
   return (
     <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
-      <img
-        src={src}
-        alt=""
-        width={1920}
-        height={1200}
-        className="h-full w-full scale-105 object-cover transition-opacity duration-[2000ms]"
+      <div
+        className="h-full w-full transition-opacity duration-[3000ms]"
+        style={{
+          background: loaded && src ? undefined : GRADIENT,
+          opacity: loaded && src ? 1 : 0.7,
+        }}
       />
-      <div className="absolute inset-0 bg-background/55" />
-      <div className="absolute -left-40 top-[-10%] h-[36rem] w-[36rem] rounded-full bg-primary/25 blur-[140px]" />
-      <div className="absolute -right-32 bottom-[-15%] h-[34rem] w-[34rem] rounded-full bg-accent/25 blur-[150px]" />
+      {src && (
+        <img
+          src={src}
+          alt=""
+          width={1920}
+          height={1080}
+          className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-[3000ms] ${
+            loaded ? "opacity-100" : "opacity-0"
+          }`}
+        />
+      )}
+      <div className="absolute inset-0 bg-background/40" />
     </div>
   );
 }

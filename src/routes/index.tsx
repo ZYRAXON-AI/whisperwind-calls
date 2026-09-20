@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import type { User } from "@supabase/supabase-js";
 
 import { Backdrop } from "@/components/Backdrop";
-import { ChatRoom } from "@/components/chat/ChatRoom";
+import { HomePage } from "@/components/HomePage";
 import { checkGate } from "@/lib/gate.functions";
 import { lovable } from "@/integrations/lovable/index";
 import { supabase } from "@/integrations/supabase/client";
@@ -28,6 +28,11 @@ export const Route = createFileRoute("/")({
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
+      { name: "theme-color", content: "#c44d6e" },
+    ],
+    links: [
+      { rel: "manifest", href: "/manifest.json" },
+      { rel: "icon", href: "/icon.svg" },
     ],
   }),
   component: Home,
@@ -40,6 +45,9 @@ function Home() {
   const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      void navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
     let alive = true;
     void (async () => {
       const { unlocked } = await gate();
@@ -75,7 +83,7 @@ function Home() {
   if (!user) return <SignIn />;
 
   return (
-    <ChatRoom
+    <HomePage
       user={user}
       onSignOut={async () => {
         await supabase.auth.signOut();

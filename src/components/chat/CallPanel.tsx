@@ -120,7 +120,7 @@ export function CallPanel({ call }: { call: Call }) {
                 type="button"
                 onClick={() => {
                   ringtone.stop();
-                  call.hangup();
+                  call.reject();
                 }}
                 className="grid h-14 w-14 place-items-center rounded-full bg-destructive text-destructive-foreground"
                 aria-label="Decline"

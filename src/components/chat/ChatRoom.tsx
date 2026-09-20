@@ -13,7 +13,6 @@ import {
 import { toast } from "sonner";
 import type { User } from "@supabase/supabase-js";
 
-import { Backdrop } from "@/components/Backdrop";
 import { Composer, type OutgoingMessage } from "./Composer";
 import { MediaBubble } from "./MediaBubble";
 import { CallPanel } from "./CallPanel";
@@ -25,6 +24,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { supabase } from "@/integrations/supabase/client";
+import { rawDb } from "@/lib/rawDb";
 import { signedUrl, uploadMedia, kindOf } from "@/lib/media";
 import { useCall } from "@/lib/useCall";
 
@@ -251,9 +251,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
   const inCall = call.status === "connected" || call.status === "calling";
 
   return (
-    <div className="relative flex h-dvh flex-col">
-      <Backdrop />
-
+    <div className="relative flex h-full flex-col">
       <header className="glass-strong z-20 m-3 flex items-center gap-3 rounded-3xl px-4 py-3">
         <div className="gradient-romance grid h-10 w-10 shrink-0 place-items-center rounded-2xl text-primary-foreground">
           <Heart className="h-5 w-5" />
