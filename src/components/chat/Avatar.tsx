@@ -7,7 +7,7 @@ export function Avatar({
   profile,
   className = "h-10 w-10",
 }: {
-  profile?: Profile | null;
+  profile?: Profile | null | undefined;
   className?: string;
 }) {
   const [url, setUrl] = useState("");
