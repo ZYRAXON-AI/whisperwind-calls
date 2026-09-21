@@ -1,246 +1,378 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Heart, LogOut, Phone, Video as VideoIcon, Settings, Circle } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Bell,
+  Circle,
+  Heart,
+  LogOut,
+  Menu,
+  MessageCircle,
+  Phone,
+  Play,
+  Settings,
+  UserPlus,
+  Users,
+  Video as VideoIcon,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 import type { User } from "@supabase/supabase-js";
 
 import { Backdrop } from "@/components/Backdrop";
-import { Composer, type OutgoingMessage } from "./Composer";
-import { MediaBubble } from "./MediaBubble";
+import { Avatar } from "./Avatar";
 import { CallPanel } from "./CallPanel";
-import { ProfileDialog, type Profile } from "./ProfileDialog";
+import { Conversation } from "./Conversation";
+import { FriendsPanel, RequestsPanel } from "./FriendsPanel";
+import { ProfileDialog } from "./ProfileDialog";
+import { ProfilePage } from "./ProfilePage";
+import { YouTubePanel } from "./YouTubePanel";
 import { supabase } from "@/integrations/supabase/client";
-import { signedUrl, uploadMedia, kindOf } from "@/lib/media";
+import { signedUrl } from "@/lib/media";
+import {
+  ensureNotificationPermission,
+  playMessageSound,
+  startRingtone,
+  stopRingtone,
+  unlockSound,
+} from "@/lib/sounds";
+import type { Friendship, Profile, View } from "@/lib/social";
+import { friendIdsOf } from "@/lib/social";
 import { useCall } from "@/lib/useCall";
 
-type Message = {
-  id: string;
-  sender_id: string;
-  kind: string;
-  body: string | null;
-  media_url: string | null;
-  media_name: string | null;
-  created_at: string;
-};
-
-const LOCAL_KEY = "zyraxon-messages";
-
 export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => void }) {
-  const [messages, setMessages] = useState<Message[]>(() => {
-    if (typeof window === "undefined") return [];
-    try {
-      return JSON.parse(localStorage.getItem(LOCAL_KEY) || "[]") as Message[];
-    } catch {
-      return [];
-    }
-  });
   const [profiles, setProfiles] = useState<Record<string, Profile>>({});
-  const [avatars, setAvatars] = useState<Record<string, string>>({});
-  const [sending, setSending] = useState(false);
+  const [friendships, setFriendships] = useState<Friendship[]>([]);
+  const [view, setView] = useState<View>({ type: "group" });
   const [profileOpen, setProfileOpen] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const [avatarSrc, setAvatarSrc] = useState("");
+  const [navOpen, setNavOpen] = useState(false);
   const call = useCall(user.id);
 
   const loadProfiles = useCallback(async () => {
-    const { data } = await supabase.from("profiles").select("id, display_name, avatar_url");
+    const { data } = await supabase
+      .from("profiles")
+      .select("id, display_name, avatar_url, created_at");
     if (!data) return;
     const map: Record<string, Profile> = {};
     for (const p of data) map[p.id] = p as Profile;
     setProfiles(map);
-    const next: Record<string, string> = {};
-    await Promise.all(
-      data.map(async (p) => {
-        if (!p.avatar_url) return;
-        next[p.id] = p.avatar_url.startsWith("http")
-          ? p.avatar_url
-          : await signedUrl(p.avatar_url);
-      }),
-    );
-    setAvatars(next);
+    const mine = map[user.id];
+    if (mine?.avatar_url) {
+      setAvatarSrc(
+        mine.avatar_url.startsWith("http") ? mine.avatar_url : await signedUrl(mine.avatar_url),
+      );
+    } else {
+      setAvatarSrc("");
+    }
+  }, [user.id]);
+
+  const loadFriendships = useCallback(async () => {
+    const { data } = await supabase.from("friendships").select("*");
+    if (data) setFriendships(data as Friendship[]);
   }, []);
 
   useEffect(() => {
     void loadProfiles();
-    void (async () => {
-      const { data } = await supabase
-        .from("messages")
-        .select("*")
-        .order("created_at", { ascending: true })
-        .limit(300);
-      if (data) setMessages(data as Message[]);
-    })();
-  }, [loadProfiles]);
+    void loadFriendships();
+    void ensureNotificationPermission();
+    unlockSound();
+  }, [loadProfiles, loadFriendships]);
 
   useEffect(() => {
     const channel = supabase
-      .channel("zyraxon-messages")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages" },
-        (payload) => {
-          setMessages((prev) => {
-            const msg = payload.new as Message;
-            if (prev.some((m) => m.id === msg.id)) return prev;
-            return [...prev, msg];
-          });
-        },
-      )
+      .channel("zyraxon-social")
       .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => {
         void loadProfiles();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "friendships" }, (payload) => {
+        void loadFriendships();
+        const row = payload.new as Friendship | null;
+        if (payload.eventType === "INSERT" && row?.addressee_id === user.id) {
+          playMessageSound();
+          toast("New friend request");
+        }
       })
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [loadProfiles]);
+  }, [loadProfiles, loadFriendships, user.id]);
 
-  // Keep a copy on this device so the conversation is there even offline.
+  // Ring while a call is coming in — works even if this tab is in the background.
   useEffect(() => {
-    try {
-      localStorage.setItem(LOCAL_KEY, JSON.stringify(messages.slice(-200)));
-    } catch {
-      /* storage full — ignore */
-    }
-  }, [messages]);
+    if (call.status === "incoming") startRingtone();
+    else stopRingtone();
+    return stopRingtone;
+  }, [call.status]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
-
+  const friendIds = useMemo(() => friendIdsOf(friendships, user.id), [friendships, user.id]);
+  const friends = friendIds.map((id) => profiles[id]).filter(Boolean) as Profile[];
+  const requests = friendships.filter((f) => f.status === "pending" && f.addressee_id === user.id);
   const me = profiles[user.id];
-
-  const send = useCallback(
-    async (msg: OutgoingMessage) => {
-      setSending(true);
-      try {
-        if (msg.kind === "text") {
-          await supabase.from("messages").insert({ sender_id: user.id, kind: "text", body: msg.body });
-        } else if (msg.kind === "gif") {
-          await supabase
-            .from("messages")
-            .insert({ sender_id: user.id, kind: "gif", media_url: msg.url });
-        } else {
-          const path = await uploadMedia(user.id, msg.file);
-          await supabase.from("messages").insert({
-            sender_id: user.id,
-            kind: kindOf(msg.file),
-            media_url: path,
-            media_name: msg.file.name,
-          });
-        }
-      } catch {
-        toast.error("Could not send that");
-      } finally {
-        setSending(false);
-      }
-    },
-    [user.id],
-  );
-
   const online = call.peerOnline > 0;
 
-  const grouped = useMemo(
-    () =>
-      messages.map((m) => ({
-        ...m,
-        mine: m.sender_id === user.id,
-        name: profiles[m.sender_id]?.display_name ?? "…",
-        avatar: avatars[m.sender_id],
-      })),
-    [messages, profiles, avatars, user.id],
-  );
+  async function addFriend(id: string) {
+    const { error } = await supabase
+      .from("friendships")
+      .insert({ requester_id: user.id, addressee_id: id });
+    if (error) toast.error("Could not send request");
+    else {
+      toast.success("Request sent");
+      void loadFriendships();
+    }
+  }
+
+  async function acceptRequest(rowId: string) {
+    const { error } = await supabase
+      .from("friendships")
+      .update({ status: "accepted" })
+      .eq("id", rowId);
+    if (error) toast.error("Could not accept");
+    else void loadFriendships();
+  }
+
+  async function removeFriendship(rowId: string) {
+    await supabase.from("friendships").delete().eq("id", rowId);
+    void loadFriendships();
+  }
+
+  function go(next: View) {
+    setView(next);
+    setNavOpen(false);
+  }
+
+  const navItem = (active: boolean) =>
+    `flex w-full items-center gap-3 rounded-2xl px-3.5 py-2.5 text-sm font-medium transition ${
+      active ? "gradient-romance text-primary-foreground" : "hover:bg-white/10"
+    }`;
+
+  const peer = view.type === "dm" ? profiles[view.peerId] : null;
+  const headerTitle =
+    view.type === "dm"
+      ? (peer?.display_name ?? "Chat")
+      : view.type === "youtube"
+        ? "YouTube"
+        : view.type === "friends"
+          ? "Friends"
+          : view.type === "requests"
+            ? "Requests"
+            : view.type === "profile"
+              ? "Profile"
+              : "Zyraxon";
 
   return (
-    <div className="relative flex h-dvh flex-col">
+    <div className="relative flex h-dvh flex-col md:flex-row" onPointerDown={unlockSound}>
       <Backdrop />
 
-      <header className="glass-strong z-20 m-3 flex items-center gap-3 rounded-3xl px-4 py-3">
-        <div className="gradient-romance grid h-10 w-10 shrink-0 place-items-center rounded-2xl text-primary-foreground">
-          <Heart className="h-5 w-5" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-base font-semibold leading-tight">Zyraxon</h1>
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Circle
-              className={`h-2 w-2 ${online ? "fill-emerald-400 text-emerald-400" : "fill-muted-foreground text-muted-foreground"}`}
-            />
-            {online ? "She is online" : "Waiting for her"}
-          </p>
+      {/* Sidebar */}
+      <aside
+        className={`glass-strong fixed inset-y-0 left-0 z-40 flex w-72 flex-col gap-3 p-3 transition-transform md:static md:m-3 md:w-72 md:translate-x-0 md:rounded-3xl ${
+          navOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        <div className="flex items-center gap-3 px-1.5 pt-1">
+          <div className="gradient-romance grid h-10 w-10 place-items-center rounded-2xl text-primary-foreground">
+            <Heart className="h-5 w-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-base font-semibold leading-tight">Zyraxon</p>
+            <p className="truncate text-xs text-muted-foreground">
+              {me?.display_name ?? "You"}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setNavOpen(false)}
+            aria-label="Close menu"
+            className="glass grid h-9 w-9 place-items-center rounded-full md:hidden"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </div>
 
-        <button
-          type="button"
-          aria-label="Audio call"
-          onClick={() => void call.startCall(false).catch(() => toast.error("Microphone blocked"))}
-          className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
-        >
-          <Phone className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          aria-label="Video call"
-          onClick={() => void call.startCall(true).catch(() => toast.error("Camera blocked"))}
-          className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
-        >
-          <VideoIcon className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          aria-label="Profile settings"
-          onClick={() => setProfileOpen(true)}
-          className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
-        >
-          <Settings className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          aria-label="Sign out"
-          onClick={onSignOut}
-          className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
-        >
-          <LogOut className="h-4 w-4" />
-        </button>
-      </header>
-
-      <main className="scroll-soft mx-auto flex w-full max-w-3xl flex-1 flex-col gap-3 overflow-y-auto px-3 pb-2">
-        {grouped.length === 0 && (
-          <p className="mt-16 text-center text-sm text-muted-foreground">
-            Say the first word. Everything here stays between you two.
-          </p>
-        )}
-        {grouped.map((m) => (
-          <div key={m.id} className={`flex gap-2 ${m.mine ? "flex-row-reverse" : ""}`}>
-            {m.avatar ? (
-              <img src={m.avatar} alt="" className="mt-auto h-8 w-8 rounded-full object-cover" />
-            ) : (
-              <span className="gradient-romance mt-auto grid h-8 w-8 place-items-center rounded-full text-xs font-semibold text-primary-foreground">
-                {m.name.slice(0, 1).toUpperCase()}
+        <nav className="flex flex-col gap-1">
+          <button type="button" className={navItem(view.type === "group")} onClick={() => go({ type: "group" })}>
+            <MessageCircle className="h-4 w-4" /> Group chat
+          </button>
+          <button type="button" className={navItem(view.type === "friends")} onClick={() => go({ type: "friends" })}>
+            <Users className="h-4 w-4" /> Friends
+          </button>
+          <button type="button" className={navItem(view.type === "requests")} onClick={() => go({ type: "requests" })}>
+            <Bell className="h-4 w-4" /> Requests
+            {requests.length > 0 && (
+              <span className="ml-auto grid h-5 min-w-5 place-items-center rounded-full bg-destructive px-1.5 text-[11px] font-semibold text-destructive-foreground">
+                {requests.length}
               </span>
             )}
-            <div
-              className={`glass max-w-[78%] rounded-3xl px-4 py-2.5 ${m.mine ? "rounded-br-lg" : "rounded-bl-lg"}`}
-            >
-              {!m.mine && (
-                <p className="mb-1 text-[11px] font-medium text-primary">{m.name}</p>
-              )}
-              {m.kind === "text" ? (
-                <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
-              ) : (
-                <MediaBubble kind={m.kind} path={m.media_url ?? ""} name={m.media_name} />
-              )}
-              <p className="mt-1 text-right text-[10px] text-muted-foreground">
-                {new Date(m.created_at).toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </p>
-            </div>
-          </div>
-        ))}
-        <div ref={bottomRef} />
-      </main>
+          </button>
+          <button type="button" className={navItem(view.type === "youtube")} onClick={() => go({ type: "youtube" })}>
+            <Play className="h-4 w-4" /> YouTube
+          </button>
+        </nav>
 
-      <div className="mx-auto w-full max-w-3xl px-3 pb-3">
-        <Composer onSend={send} sending={sending} />
+        <div className="scroll-soft mt-1 flex-1 overflow-y-auto">
+          <p className="px-3 pb-2 text-[11px] uppercase tracking-wider text-muted-foreground">
+            Your people
+          </p>
+          <div className="flex flex-col gap-1">
+            {friends.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                onClick={() => go({ type: "dm", peerId: f.id })}
+                className={`flex items-center gap-3 rounded-2xl px-3 py-2 text-left transition ${
+                  view.type === "dm" && view.peerId === f.id ? "bg-white/15" : "hover:bg-white/10"
+                }`}
+              >
+                <Avatar profile={f} className="h-9 w-9" />
+                <span className="truncate text-sm">{f.display_name}</span>
+              </button>
+            ))}
+            {friends.length === 0 && (
+              <button
+                type="button"
+                onClick={() => go({ type: "friends" })}
+                className="glass flex items-center gap-2 rounded-2xl px-3 py-2.5 text-xs text-muted-foreground"
+              >
+                <UserPlus className="h-4 w-4" /> Find people to add
+              </button>
+            )}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => go({ type: "profile", userId: user.id })}
+          className="glass flex items-center gap-3 rounded-2xl px-3 py-2.5 text-left"
+        >
+          <Avatar profile={me} className="h-9 w-9" />
+          <span className="truncate text-sm">My profile</span>
+        </button>
+      </aside>
+
+      {navOpen && (
+        <button
+          type="button"
+          aria-label="Close menu"
+          onClick={() => setNavOpen(false)}
+          className="fixed inset-0 z-30 bg-black/50 md:hidden"
+        />
+      )}
+
+      {/* Main column */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="glass-strong z-20 m-3 flex items-center gap-2 rounded-3xl px-3 py-3 sm:gap-3 sm:px-4">
+          <button
+            type="button"
+            onClick={() => setNavOpen(true)}
+            aria-label="Open menu"
+            className="glass grid h-10 w-10 place-items-center rounded-full md:hidden"
+          >
+            <Menu className="h-4 w-4" />
+          </button>
+
+          {peer ? (
+            <button type="button" onClick={() => go({ type: "profile", userId: peer.id })}>
+              <Avatar profile={peer} className="h-10 w-10" />
+            </button>
+          ) : (
+            <div className="gradient-romance hidden h-10 w-10 shrink-0 place-items-center rounded-2xl text-primary-foreground sm:grid">
+              <Heart className="h-5 w-5" />
+            </div>
+          )}
+
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-base font-semibold leading-tight">{headerTitle}</h1>
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Circle
+                className={`h-2 w-2 ${online ? "fill-emerald-400 text-emerald-400" : "fill-muted-foreground text-muted-foreground"}`}
+              />
+              {online ? "Online now" : "Offline"}
+            </p>
+          </div>
+
+          <button
+            type="button"
+            aria-label="Audio call"
+            onClick={() => void call.startCall(false).catch(() => toast.error("Microphone blocked"))}
+            className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
+          >
+            <Phone className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            aria-label="Video call"
+            onClick={() => void call.startCall(true).catch(() => toast.error("Camera blocked"))}
+            className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
+          >
+            <VideoIcon className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            aria-label="Profile settings"
+            onClick={() => setProfileOpen(true)}
+            className="glass hidden h-10 w-10 place-items-center rounded-full transition hover:bg-white/15 sm:grid"
+          >
+            <Settings className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            aria-label="Sign out"
+            onClick={onSignOut}
+            className="glass hidden h-10 w-10 place-items-center rounded-full transition hover:bg-white/15 sm:grid"
+          >
+            <LogOut className="h-4 w-4" />
+          </button>
+        </header>
+
+        <div className="min-h-0 flex-1">
+          {(view.type === "group" || view.type === "dm") && (
+            <Conversation
+              key={view.type === "dm" ? view.peerId : "group"}
+              me={user.id}
+              peerId={view.type === "dm" ? view.peerId : null}
+              profiles={profiles}
+              onOpenProfile={(id) => go({ type: "profile", userId: id })}
+            />
+          )}
+
+          {view.type === "friends" && (
+            <FriendsPanel
+              profiles={Object.values(profiles)}
+              friendships={friendships}
+              me={user.id}
+              onAdd={(id) => void addFriend(id)}
+              onAccept={(id) => void acceptRequest(id)}
+              onRemove={(id) => void removeFriendship(id)}
+              onOpenProfile={(id) => go({ type: "profile", userId: id })}
+              onMessage={(id) => go({ type: "dm", peerId: id })}
+            />
+          )}
+
+          {view.type === "requests" && (
+            <RequestsPanel
+              requests={requests}
+              profiles={profiles}
+              onAccept={(id) => void acceptRequest(id)}
+              onDecline={(id) => void removeFriendship(id)}
+              onOpenProfile={(id) => go({ type: "profile", userId: id })}
+            />
+          )}
+
+          {view.type === "youtube" && <YouTubePanel />}
+
+          {view.type === "profile" && profiles[view.userId] && (
+            <ProfilePage
+              profile={profiles[view.userId] as Profile}
+              me={user.id}
+              friendships={friendships}
+              friendCount={view.userId === user.id ? friendIds.length : 0}
+              onBack={() => go({ type: "group" })}
+              onAdd={(id) => void addFriend(id)}
+              onAccept={(id) => void acceptRequest(id)}
+              onMessage={(id) => go({ type: "dm", peerId: id })}
+            />
+          )}
+        </div>
       </div>
 
       <CallPanel call={call} />
@@ -250,7 +382,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
           open={profileOpen}
           onOpenChange={setProfileOpen}
           profile={me}
-          avatarSrc={avatars[user.id] ?? ""}
+          avatarSrc={avatarSrc}
           onSaved={loadProfiles}
         />
       )}
