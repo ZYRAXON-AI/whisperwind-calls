@@ -30,7 +30,15 @@ export function Avatar({
   }, [path]);
 
   if (url) {
-    return <img src={url} alt="" className={`${className} shrink-0 rounded-full object-cover`} />;
+    return (
+      <img
+        src={url}
+        alt=""
+        referrerPolicy="no-referrer"
+        onError={() => setUrl("")}
+        className={`${className} shrink-0 rounded-full object-cover`}
+      />
+    );
   }
   return (
     <span
