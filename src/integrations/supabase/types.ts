@@ -14,32 +14,62 @@ export type Database = {
   }
   public: {
     Tables: {
+      friendships: {
+        Row: {
+          addressee_id: string
+          created_at: string
+          id: string
+          requester_id: string
+          status: string
+        }
+        Insert: {
+          addressee_id: string
+          created_at?: string
+          id?: string
+          requester_id: string
+          status?: string
+        }
+        Update: {
+          addressee_id?: string
+          created_at?: string
+          id?: string
+          requester_id?: string
+          status?: string
+        }
+        Relationships: []
+      }
       messages: {
         Row: {
           body: string | null
           created_at: string
+          edited_at: string | null
           id: string
           kind: string
           media_name: string | null
           media_url: string | null
+          recipient_id: string | null
           sender_id: string
         }
         Insert: {
           body?: string | null
           created_at?: string
+          edited_at?: string | null
           id?: string
           kind?: string
           media_name?: string | null
           media_url?: string | null
+          recipient_id?: string | null
           sender_id: string
         }
         Update: {
           body?: string | null
           created_at?: string
+          edited_at?: string | null
           id?: string
           kind?: string
           media_name?: string | null
           media_url?: string | null
+          recipient_id?: string | null
           sender_id?: string
         }
         Relationships: []

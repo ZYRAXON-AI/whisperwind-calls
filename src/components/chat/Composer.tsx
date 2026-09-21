@@ -1,11 +1,10 @@
 import { useRef, useState } from "react";
 import EmojiPicker, { Theme } from "emoji-picker-react";
-import { Plus, Send, Smile, ImageIcon, Video, Music, Loader2, Mic, MicOff } from "lucide-react";
+import { Plus, Send, Smile, ImageIcon, Video, Music, Loader2 } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GifPicker } from "./GifPicker";
-import { useSpeech } from "@/hooks/useSpeech";
 
 export type OutgoingMessage =
   | { kind: "text"; body: string }
@@ -25,13 +24,11 @@ export function Composer({
   const imageRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLInputElement>(null);
-  const speech = useSpeech();
 
   function submit() {
     const body = text.trim();
     if (!body) return;
     setText("");
-    speech.reset();
     void onSend({ kind: "text", body });
   }
 
@@ -40,17 +37,6 @@ export function Composer({
     if (!file) return;
     setPlusOpen(false);
     void onSend({ kind: "file", file });
-  }
-
-  function toggleMic() {
-    if (speech.listening) {
-      const finalText = speech.stop();
-      if (finalText) setText((prev) => (prev + " " + finalText).trim());
-    } else {
-      speech.start((interimText) => {
-        setText(interimText);
-      });
-    }
   }
 
   return (
@@ -146,21 +132,6 @@ export function Composer({
           </PopoverContent>
         </Popover>
 
-        {speech.available && (
-          <button
-            type="button"
-            onClick={toggleMic}
-            aria-label={speech.listening ? "Stop speech input" : "Start speech input"}
-            className={`grid h-11 w-11 shrink-0 place-items-center rounded-full transition ${
-              speech.listening
-                ? "bg-destructive text-destructive-foreground animate-pulse"
-                : "glass hover:bg-white/15"
-            }`}
-          >
-            {speech.listening ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
-          </button>
-        )}
-
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -171,7 +142,7 @@ export function Composer({
             }
           }}
           rows={1}
-          placeholder={speech.listening ? "Listening…" : "Write something sweet…"}
+          placeholder="Write something sweet…"
           className="scroll-soft max-h-32 min-h-11 flex-1 resize-none rounded-2xl border border-border bg-input px-4 py-3 text-sm outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring/50"
         />
 

@@ -47,7 +47,7 @@ function Unlock() {
 
   return (
     <div className="relative flex min-h-screen items-center justify-center px-5 py-10">
-      <Backdrop variant="silk" />
+      <Backdrop />
       <form
         onSubmit={onSubmit}
         className="glass-strong glow w-full max-w-md rounded-3xl p-8 text-center"
