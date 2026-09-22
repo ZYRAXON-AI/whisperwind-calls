@@ -11,7 +11,6 @@ import {
   Maximize2,
   Tv,
 } from "lucide-react";
-import { toast } from "sonner";
 import type { useCall } from "@/lib/useCall";
 
 type Call = ReturnType<typeof useCall>;
@@ -32,12 +31,12 @@ function Stream({
   return <video ref={ref} autoPlay playsInline muted={muted} className={className} />;
 }
 
-export function CallPanel({ call }: { call: Call }) {
+export function CallPanel({ call, peerName = "Friend" }: { call: Call; peerName?: string }) {
   const [isMinimized, setIsMinimized] = useState(false);
 
   if (call.status === "idle") return null;
 
-  // ইনকামিং কল ডায়ালগ
+  // Incoming Call Dialog
   if (call.status === "incoming") {
     return (
       <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-5 backdrop-blur-md">
@@ -49,7 +48,7 @@ export function CallPanel({ call }: { call: Call }) {
           <h2 className="mt-5 text-xl font-bold">
             Incoming {call.incomingVideo ? "Video" : "Audio"} Call
           </h2>
-          <p className="mt-1 text-xs text-muted-foreground">Ringtone ringing…</p>
+          <p className="mt-1 text-xs text-muted-foreground">{peerName} is calling you…</p>
           <div className="mt-8 flex justify-center gap-6">
             <button
               type="button"
@@ -73,7 +72,7 @@ export function CallPanel({ call }: { call: Call }) {
     );
   }
 
-  // মিনিমাইজড মোড (ডান পাশে ফ্লোটিং ছোট উইন্ডো - নিচে চ্যাট বক্স ব্যবহারযোগ্য)
+  // Minimized PiP Mode
   if (isMinimized) {
     return (
       <div className="fixed bottom-20 right-4 z-50 flex w-72 flex-col overflow-hidden rounded-3xl border border-white/20 bg-background/95 p-3 shadow-2xl backdrop-blur-2xl">
@@ -96,7 +95,7 @@ export function CallPanel({ call }: { call: Call }) {
           <Stream stream={call.remoteStream} className="h-full w-full object-cover" />
           {call.peerSharingScreen && (
             <span className="absolute top-2 left-2 rounded-lg bg-primary/80 px-2 py-0.5 text-[10px] font-bold text-white">
-              Peer Screen
+              Screen Share
             </span>
           )}
         </div>
@@ -130,10 +129,9 @@ export function CallPanel({ call }: { call: Call }) {
     );
   }
 
-  // ফুলস্ক্রিন কল উইন্ডো
+  // Fullscreen Call Window
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black/85 backdrop-blur-2xl">
-      {/* টপ বার: মিনিমাইজ বাটন */}
+    <div className="fixed inset-0 z-50 flex flex-col bg-black/90 backdrop-blur-2xl">
       <div className="flex items-center justify-between px-6 pt-4 pb-2">
         <div className="flex items-center gap-2 text-sm text-white/80">
           <span className="h-2.5 w-2.5 rounded-full bg-green-500 animate-ping" />
@@ -150,7 +148,6 @@ export function CallPanel({ call }: { call: Call }) {
         </button>
       </div>
 
-      {/* ভিডিও / স্ক্রিন শেয়ার এরিয়া */}
       <div className="relative flex-1 overflow-hidden p-2 sm:p-4">
         <Stream
           stream={call.remoteStream}
@@ -160,19 +157,18 @@ export function CallPanel({ call }: { call: Call }) {
         {call.peerSharingScreen && (
           <div className="absolute top-6 left-6 flex items-center gap-2 rounded-2xl bg-black/70 px-4 py-2 text-xs font-semibold text-white backdrop-blur-md">
             <Tv className="h-4 w-4 text-primary" />
-            <span>Peer is sharing their screen</span>
+            <span>Screen is being shared</span>
           </div>
         )}
 
         {call.status === "calling" && (
           <div className="absolute inset-0 grid place-items-center">
-            <p className="glass rounded-3xl px-6 py-3 text-base font-semibold shadow-xl">
-              Ringing… অনুগ্রহ করে অপেক্ষা করুন
+            <p className="glass rounded-3xl px-6 py-3 text-base font-semibold shadow-xl text-white">
+              Ringing… Calling {peerName}
             </p>
           </div>
         )}
 
-        {/* নিজের ক্যামেরা ভিউ (Self Preview) */}
         {call.withVideo && (
           <div className="glass-strong absolute bottom-6 right-6 h-36 w-24 overflow-hidden rounded-2xl shadow-2xl sm:h-48 sm:w-36 border border-white/20">
             <Stream stream={call.localStream} muted className="h-full w-full object-cover" />
@@ -180,7 +176,6 @@ export function CallPanel({ call }: { call: Call }) {
         )}
       </div>
 
-      {/* বটম কন্ট্রোল বার */}
       <div className="glass-strong m-4 flex flex-wrap items-center justify-center gap-4 rounded-3xl p-4 shadow-2xl">
         <button
           type="button"
@@ -202,7 +197,6 @@ export function CallPanel({ call }: { call: Call }) {
           </button>
         )}
 
-        {/* হাই-কোয়ালিটি স্ক্রিন শেয়ার বাটন */}
         <button
           type="button"
           onClick={() => {
@@ -213,7 +207,7 @@ export function CallPanel({ call }: { call: Call }) {
             }
           }}
           aria-label="Share Screen"
-          title="Share High Quality Screen (Desktop/Mobile)"
+          title="Share Screen (Desktop & Mobile)"
           className={`grid h-12 w-12 place-items-center rounded-full transition ${
             call.sharingScreen
               ? "bg-primary text-primary-foreground ring-4 ring-primary/40"
@@ -223,7 +217,6 @@ export function CallPanel({ call }: { call: Call }) {
           <MonitorUp className="h-5 w-5" />
         </button>
 
-        {/* কল কাটার বাটন */}
         <button
           type="button"
           onClick={call.hangup}
