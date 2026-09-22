@@ -9,6 +9,7 @@ import {
   Music,
   Loader2,
   Mic,
+  MicOff,
   Square,
   Trash2,
 } from "lucide-react";
@@ -22,6 +23,12 @@ export type OutgoingMessage =
   | { kind: "gif"; url: string }
   | { kind: "file"; file: File };
 
+// Browser SpeechRecognition interface declaration
+interface IWindow extends Window {
+  SpeechRecognition?: any;
+  webkitSpeechRecognition?: any;
+}
+
 export function Composer({
   onSend,
   sending,
@@ -33,7 +40,14 @@ export function Composer({
   const [plusOpen, setPlusOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
 
-  // Voice recording states
+  // --- ১. লাইভ ভয়েস টাইপিং (Speech-to-Text) স্টেটস ---
+  const [isSpeechListening, setIsSpeechListening] = useState(false);
+  const [speechLang, setSpeechLang] = useState<"bn-BD" | "en-US">("bn-BD");
+  const speechRecognitionRef = useRef<any>(null);
+  const shouldKeepListeningRef = useRef<boolean>(false);
+  const baseTextRef = useRef<string>("");
+
+  // --- ২. অডিও মেসেজ রেকর্ডিং স্টেটস ---
   const [isRecording, setIsRecording] = useState(false);
   const [recordSec, setRecordSec] = useState(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -44,13 +58,118 @@ export function Composer({
   const videoRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLInputElement>(null);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
+      shouldKeepListeningRef.current = false;
+      if (speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.abort();
+        } catch {}
+      }
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, []);
 
+  // --- লাইভ ভয়েস টাইপিং লজিক ---
+  function startSpeechRecognition() {
+    const win = window as unknown as IWindow;
+    const SpeechRecognitionClass = win.SpeechRecognition || win.webkitSpeechRecognition;
+
+    if (!SpeechRecognitionClass) {
+      alert("Your browser does not support Voice Typing (Speech Recognition). Please use Chrome/Edge.");
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognitionClass();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = speechLang;
+
+      recognition.onstart = () => {
+        setIsSpeechListening(true);
+        shouldKeepListeningRef.current = true;
+        baseTextRef.current = text;
+      };
+
+      recognition.onresult = (event: any) => {
+        let interimTranscript = "";
+        let finalTranscript = "";
+
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          const item = event.results[i];
+          if (item.isFinal) {
+            finalTranscript += item[0].transcript;
+          } else {
+            interimTranscript += item[0].transcript;
+          }
+        }
+
+        setText((prev) => {
+          const prefix = baseTextRef.current ? baseTextRef.current + " " : "";
+          const combined = (prefix + finalTranscript + (interimTranscript ? " " + interimTranscript : "")).trimStart();
+          if (finalTranscript) {
+            baseTextRef.current = (prefix + finalTranscript).trim();
+          }
+          return combined;
+        });
+      };
+
+      recognition.onerror = (event: any) => {
+        if (event.error === "no-speech") return;
+        if (event.error === "not-allowed") {
+          alert("Microphone permission was denied.");
+          stopSpeechRecognition();
+        }
+      };
+
+      // মেসেজ সেন্ড করার পরেও যেন স্বয়ংক্রিয়ভাবে মাইক চালু থাকে
+      recognition.onend = () => {
+        if (shouldKeepListeningRef.current) {
+          try {
+            recognition.start();
+          } catch {
+            setIsSpeechListening(false);
+          }
+        } else {
+          setIsSpeechListening(false);
+        }
+      };
+
+      speechRecognitionRef.current = recognition;
+      recognition.start();
+    } catch {
+      setIsSpeechListening(false);
+    }
+  }
+
+  function stopSpeechRecognition() {
+    shouldKeepListeningRef.current = false;
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch {}
+      speechRecognitionRef.current = null;
+    }
+    setIsSpeechListening(false);
+  }
+
+  function toggleSpeechRecognition() {
+    if (isSpeechListening) {
+      stopSpeechRecognition();
+    } else {
+      startSpeechRecognition();
+    }
+  }
+
+  // --- অডিও ফাইল রেকর্ডিং (Voice Note) লজিক ---
   async function startRecording() {
+    // ভয়েস টাইপিং চালু থাকলে সাময়িক পজ
+    if (isSpeechListening) {
+      stopSpeechRecognition();
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
@@ -106,11 +225,18 @@ export function Composer({
     setRecordSec(0);
   }
 
+  // --- মেসেজ সেন্ড লজিক ---
   function submit() {
     const body = text.trim();
     if (!body) return;
-    setText("");
+
+    // টেক্সট পাঠানো
     void onSend({ kind: "text", body });
+
+    // বক্স খালি করা কিন্তু ভয়েস টাইপিং মাইক চালু রাখা
+    setText("");
+    baseTextRef.current = "";
+    // Note: shouldKeepListeningRef.current remains true, so speech mic stays active!
   }
 
   function pickFile(list: FileList | null) {
@@ -153,6 +279,7 @@ export function Composer({
       <div className="flex items-end gap-2">
         {!isRecording ? (
           <>
+            {/* ১. Plus Media Picker */}
             <Popover open={plusOpen} onOpenChange={setPlusOpen}>
               <PopoverTrigger asChild>
                 <button
@@ -181,6 +308,7 @@ export function Composer({
               </PopoverContent>
             </Popover>
 
+            {/* ২. Emoji & GIF Picker */}
             <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
               <PopoverTrigger asChild>
                 <button
@@ -206,7 +334,10 @@ export function Composer({
                       width="100%"
                       height={320}
                       lazyLoadEmojis
-                      onEmojiClick={(e) => setText((t) => t + e.emoji)}
+                      onEmojiClick={(e) => {
+                        setText((t) => t + e.emoji);
+                        baseTextRef.current += e.emoji;
+                      }}
                     />
                   </TabsContent>
                   <TabsContent value="gif">
@@ -221,9 +352,56 @@ export function Composer({
               </PopoverContent>
             </Popover>
 
+            {/* ৩. বাম পাশের লাইভ ভয়েস টাইপিং মাইক (Voice-to-Text) */}
+            <button
+              type="button"
+              onClick={toggleSpeechRecognition}
+              title={
+                isSpeechListening
+                  ? "Voice Typing Active (Click to stop) — Keep talking!"
+                  : "Click to speak & auto-type"
+              }
+              aria-label="Voice typing"
+              className={`relative grid h-11 w-11 shrink-0 place-items-center rounded-full transition ${
+                isSpeechListening
+                  ? "bg-red-500/90 text-white shadow-lg ring-4 ring-red-500/40 animate-pulse"
+                  : "glass hover:bg-white/15 text-foreground"
+              }`}
+            >
+              {isSpeechListening ? <Mic className="h-5 w-5" /> : <Mic className="h-5 w-5 opacity-80" />}
+              {isSpeechListening && (
+                <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+                </span>
+              )}
+            </button>
+
+            {/* ভাষা পরিবর্তনের ছোট্ট টগল (বাংলা / English) */}
+            {isSpeechListening && (
+              <button
+                type="button"
+                onClick={() => {
+                  const next = speechLang === "bn-BD" ? "en-US" : "bn-BD";
+                  setSpeechLang(next);
+                  if (speechRecognitionRef.current) {
+                    speechRecognitionRef.current.lang = next;
+                  }
+                }}
+                className="glass shrink-0 rounded-full px-2 py-1 text-[10px] font-bold text-primary"
+                title="Change voice language"
+              >
+                {speechLang === "bn-BD" ? "বাংলা" : "EN"}
+              </button>
+            )}
+
+            {/* ৪. টেক্সট ইনপুট এরিয়া */}
             <textarea
               value={text}
-              onChange={(e) => setText(e.target.value)}
+              onChange={(e) => {
+                setText(e.target.value);
+                baseTextRef.current = e.target.value;
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -231,17 +409,24 @@ export function Composer({
                 }
               }}
               rows={1}
-              placeholder="Write something sweet…"
-              className="scroll-soft max-h-32 min-h-11 flex-1 resize-none rounded-2xl border border-border bg-input px-4 py-3 text-sm outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring/50"
+              placeholder={
+                isSpeechListening
+                  ? "Listening… বলুন, সরাসরি লেখা উঠছে…"
+                  : "Write something sweet…"
+              }
+              className={`scroll-soft max-h-32 min-h-11 flex-1 resize-none rounded-2xl border bg-input px-4 py-3 text-sm outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring/50 transition ${
+                isSpeechListening ? "border-red-500/50 ring-2 ring-red-500/20" : "border-border"
+              }`}
             />
 
+            {/* ৫. সেন্ড বাটন অথবা ভয়েস রেকর্ড বাটন */}
             {text.trim() ? (
               <button
                 type="button"
                 onClick={submit}
                 disabled={sending}
                 aria-label="Send"
-                className="gradient-romance grid h-11 w-11 shrink-0 place-items-center rounded-full text-primary-foreground transition hover:opacity-90 disabled:opacity-40"
+                className="gradient-romance grid h-11 w-11 shrink-0 place-items-center rounded-full text-primary-foreground transition hover:opacity-90 disabled:opacity-40 shadow-lg"
               >
                 {sending ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
               </button>
@@ -250,13 +435,15 @@ export function Composer({
                 type="button"
                 onClick={startRecording}
                 aria-label="Record voice note"
-                className="gradient-romance grid h-11 w-11 shrink-0 place-items-center rounded-full text-primary-foreground transition hover:opacity-90 active:scale-95"
+                title="Hold or click to record audio message"
+                className="gradient-romance grid h-11 w-11 shrink-0 place-items-center rounded-full text-primary-foreground transition hover:opacity-90 active:scale-95 shadow"
               >
                 <Mic className="h-5 w-5" />
               </button>
             )}
           </>
         ) : (
+          /* ভয়েস অডিও ক্লিপ রেকর্ড মোড */
           <div className="flex w-full items-center gap-3 py-1">
             <button
               type="button"
