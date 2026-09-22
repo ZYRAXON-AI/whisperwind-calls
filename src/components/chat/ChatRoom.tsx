@@ -1,24 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Bell,
-  Circle,
-  Download,
-  Heart,
-  LogOut,
-  Menu,
-  MessageCircle,
-  Phone,
-  Play,
-  Settings,
-  Shield,
-  UserPlus,
-  Users,
-  Video as VideoIcon,
-  X,
+  Bell, Circle, Download, Heart, LogOut, Menu, MessageCircle,
+  Phone, Play, Settings, Shield, UserPlus, Users, Video as VideoIcon, X,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { User } from "@supabase/supabase-js";
-
 import { Backdrop } from "@/components/Backdrop";
 import { Avatar } from "./Avatar";
 import { CallPanel } from "./CallPanel";
@@ -30,11 +16,8 @@ import { YouTubePanel } from "./YouTubePanel";
 import { supabase } from "@/integrations/supabase/client";
 import { signedUrl } from "@/lib/media";
 import {
-  ensureNotificationPermission,
-  playMessageSound,
-  startRingtone,
-  stopRingtone,
-  unlockSound,
+  ensureNotificationPermission, playMessageSound, startRingtone,
+  stopRingtone, unlockSound,
 } from "@/lib/sounds";
 import type { Friendship, Profile, View } from "@/lib/social";
 import { friendIdsOf } from "@/lib/social";
@@ -49,16 +32,12 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
   const [navOpen, setNavOpen] = useState(false);
   const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(new Set());
   const [installPrompt, setInstallPrompt] = useState<any>(null);
-
   const call = useCall(user.id);
   const isGuest = user.email?.endsWith("@guest.local") || false;
 
   // Capture PWA install prompt for mobile & desktop
   useEffect(() => {
-    const handler = (e: any) => {
-      e.preventDefault();
-      setInstallPrompt(e);
-    };
+    const handler = (e: any) => { e.preventDefault(); setInstallPrompt(e); };
     window.addEventListener("beforeinstallprompt", handler);
     return () => window.removeEventListener("beforeinstallprompt", handler);
   }, []);
@@ -77,18 +56,14 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
   }
 
   const loadProfiles = useCallback(async () => {
-    const { data } = await supabase
-      .from("profiles")
-      .select("id, display_name, avatar_url, created_at");
+    const { data } = await supabase.from("profiles").select("id, display_name, avatar_url, created_at");
     if (!data) return;
     const map: Record<string, Profile> = {};
     for (const p of data) map[p.id] = p as Profile;
     setProfiles(map);
     const mine = map[user.id];
     if (mine?.avatar_url) {
-      setAvatarSrc(
-        mine.avatar_url.startsWith("http") ? mine.avatar_url : await signedUrl(mine.avatar_url),
-      );
+      setAvatarSrc(mine.avatar_url.startsWith("http") ? mine.avatar_url : await signedUrl(mine.avatar_url));
     } else {
       setAvatarSrc("");
     }
@@ -108,10 +83,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
 
   // Realtime Presence tracking
   useEffect(() => {
-    const presenceChannel = supabase.channel("zyraxon-online-status", {
-      config: { presence: { key: user.id } },
-    });
-
+    const presenceChannel = supabase.channel("zyraxon-online-status", { config: { presence: { key: user.id } } });
     presenceChannel
       .on("presence", { event: "sync" }, () => {
         const state = presenceChannel.presenceState();
@@ -120,23 +92,15 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          await presenceChannel.track({
-            online_at: new Date().toISOString(),
-          });
+          await presenceChannel.track({ online_at: new Date().toISOString() });
         }
       });
-
-    return () => {
-      supabase.removeChannel(presenceChannel);
-    };
+    return () => { supabase.removeChannel(presenceChannel); };
   }, [user.id]);
 
   useEffect(() => {
-    const channel = supabase
-      .channel("zyraxon-social")
-      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => {
-        void loadProfiles();
-      })
+    const channel = supabase.channel("zyraxon-social")
+      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => { void loadProfiles(); })
       .on("postgres_changes", { event: "*", schema: "public", table: "friendships" }, (payload) => {
         void loadFriendships();
         const row = payload.new as Friendship | null;
@@ -146,9 +110,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
         }
       })
       .subscribe();
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => { supabase.removeChannel(channel); };
   }, [loadProfiles, loadFriendships, user.id]);
 
   useEffect(() => {
@@ -163,21 +125,13 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
   const me = profiles[user.id];
 
   async function addFriend(id: string) {
-    const { error } = await supabase
-      .from("friendships")
-      .insert({ requester_id: user.id, addressee_id: id });
+    const { error } = await supabase.from("friendships").insert({ requester_id: user.id, addressee_id: id });
     if (error) toast.error("Could not send request");
-    else {
-      toast.success("Request sent");
-      void loadFriendships();
-    }
+    else { toast.success("Request sent"); void loadFriendships(); }
   }
 
   async function acceptRequest(rowId: string) {
-    const { error } = await supabase
-      .from("friendships")
-      .update({ status: "accepted" })
-      .eq("id", rowId);
+    const { error } = await supabase.from("friendships").update({ status: "accepted" }).eq("id", rowId);
     if (error) toast.error("Could not accept");
     else void loadFriendships();
   }
@@ -194,37 +148,43 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
 
   const navItem = (active: boolean) =>
     `flex w-full items-center gap-3 rounded-2xl px-3.5 py-2.5 text-sm font-medium transition ${
-      active ? "gradient-romance text-primary-foreground" : "hover:bg-white/10"
+      active ? "gradient-romance text-primary-foreground shadow-md" : "hover:bg-white/10"
     }`;
 
   const peer = view.type === "dm" ? profiles[view.peerId] : null;
   const isPeerOnline = peer ? onlineUserIds.has(peer.id) : call.peerOnline > 0;
 
   const headerTitle =
-    view.type === "dm"
-      ? (peer?.display_name ?? "Chat")
-      : view.type === "youtube"
-        ? "YouTube"
-        : view.type === "friends"
-          ? "Friends"
-          : view.type === "requests"
-            ? "Requests"
-            : view.type === "profile"
-              ? "Profile"
-              : "Zyraxon";
+    view.type === "dm" ? (peer?.display_name ?? "Chat") :
+    view.type === "youtube" ? "YouTube" :
+    view.type === "friends" ? "Friends" :
+    view.type === "requests" ? "Requests" :
+    view.type === "profile" ? "Profile" : "Zyraxon";
 
   return (
-    <div className="relative flex h-dvh flex-col md:flex-row" onPointerDown={unlockSound}>
+    <div className="relative flex h-dvh w-full overflow-hidden flex-col md:flex-row" onPointerDown={unlockSound}>
       <Backdrop />
 
-      {/* Sidebar */}
+      {/* Dark overlay backdrop for mobile sidebar */}
+      {navOpen && (
+        <div
+          role="button"
+          tabIndex={0}
+          aria-label="Close menu"
+          onClick={() => setNavOpen(false)}
+          onKeyDown={(e) => e.key === "Escape" && setNavOpen(false)}
+          className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm transition-opacity md:hidden"
+        />
+      )}
+
+      {/* Sidebar (Desktop static, Mobile slide-over) */}
       <aside
-        className={`glass-strong fixed inset-y-0 left-0 z-40 flex w-72 flex-col gap-3 p-3 transition-transform md:static md:m-3 md:w-72 md:translate-x-0 md:rounded-3xl ${
+        className={`glass-strong fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col gap-3 p-3.5 shadow-2xl transition-transform duration-300 md:static md:m-3 md:w-72 md:translate-x-0 md:rounded-3xl md:shadow-none ${
           navOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
         <div className="flex items-center gap-3 px-1.5 pt-1">
-          <div className="gradient-romance grid h-10 w-10 place-items-center rounded-2xl text-primary-foreground">
+          <div className="gradient-romance grid h-10 w-10 shrink-0 place-items-center rounded-2xl text-primary-foreground shadow">
             <Heart className="h-5 w-5" />
           </div>
           <div className="min-w-0 flex-1">
@@ -238,9 +198,9 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
             type="button"
             onClick={() => setNavOpen(false)}
             aria-label="Close menu"
-            className="glass grid h-9 w-9 place-items-center rounded-full md:hidden"
+            className="glass grid h-9 w-9 shrink-0 place-items-center rounded-full hover:bg-white/20 active:scale-95 md:hidden"
           >
-            <X className="h-4 w-4" />
+            <X className="h-5 w-5" />
           </button>
         </div>
 
@@ -270,7 +230,6 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
           </button>
         </nav>
 
-        {/* Install Desktop / Mobile App Button */}
         <button
           type="button"
           onClick={handleInstallApp}
@@ -280,9 +239,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
         </button>
 
         <div className="scroll-soft mt-1 flex-1 overflow-y-auto">
-          <p className="px-3 pb-2 text-[11px] uppercase tracking-wider text-muted-foreground">
-            Your people
-          </p>
+          <p className="px-3 pb-2 text-[11px] uppercase tracking-wider text-muted-foreground font-semibold">Your people</p>
           <div className="flex flex-col gap-1">
             {friends.map((f) => {
               const friendOnline = onlineUserIds.has(f.id);
@@ -305,9 +262,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium">{f.display_name}</p>
-                    <p className="text-[11px] text-muted-foreground">
-                      {friendOnline ? "Online" : "Offline"}
-                    </p>
+                    <p className="text-[11px] text-muted-foreground">{friendOnline ? "Online" : "Offline"}</p>
                   </div>
                 </button>
               );
@@ -327,36 +282,29 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
         <button
           type="button"
           onClick={() => go({ type: "profile", userId: user.id })}
-          className="glass flex items-center gap-3 rounded-2xl px-3 py-2.5 text-left"
+          className="glass flex items-center gap-3 rounded-2xl px-3 py-2.5 text-left hover:bg-white/10 transition"
         >
           <Avatar profile={me} className="h-9 w-9" />
           <span className="truncate text-sm font-medium">My profile</span>
         </button>
       </aside>
 
-      {navOpen && (
-        <button
-          type="button"
-          aria-label="Close menu"
-          onClick={() => setNavOpen(false)}
-          className="fixed inset-0 z-30 bg-black/50 md:hidden"
-        />
-      )}
-
       {/* Main column */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="glass-strong z-20 m-3 flex items-center gap-2 rounded-3xl px-3 py-3 sm:gap-3 sm:px-4">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        {/* Header with guaranteed visible 3-line hamburger menu on mobile */}
+        <header className="glass-strong z-20 m-2 sm:m-3 flex shrink-0 items-center gap-2 rounded-2xl sm:rounded-3xl px-3 py-2.5 sm:px-4 sm:py-3 shadow-lg">
+          {/* 3-rack / Hamburger Button for mobile */}
           <button
             type="button"
             onClick={() => setNavOpen(true)}
             aria-label="Open menu"
-            className="glass grid h-10 w-10 place-items-center rounded-full md:hidden"
+            className="glass shrink-0 grid h-10 w-10 place-items-center rounded-2xl border border-white/20 bg-white/10 text-white shadow transition hover:bg-white/20 active:scale-95 md:hidden"
           >
-            <Menu className="h-4 w-4" />
+            <Menu className="h-5 w-5" />
           </button>
 
           {peer ? (
-            <button type="button" onClick={() => go({ type: "profile", userId: peer.id })}>
+            <button type="button" onClick={() => go({ type: "profile", userId: peer.id })} className="shrink-0">
               <Avatar profile={peer} className="h-10 w-10" />
             </button>
           ) : (
@@ -381,7 +329,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
             type="button"
             aria-label="Audio call"
             onClick={() => void call.startCall(false).catch(() => toast.error("Microphone blocked"))}
-            className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
+            className="glass shrink-0 grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
           >
             <Phone className="h-4 w-4" />
           </button>
@@ -389,7 +337,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
             type="button"
             aria-label="Video call"
             onClick={() => void call.startCall(true).catch(() => toast.error("Camera blocked"))}
-            className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
+            className="glass shrink-0 grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
           >
             <VideoIcon className="h-4 w-4" />
           </button>
@@ -397,7 +345,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
             type="button"
             aria-label="Profile settings"
             onClick={() => setProfileOpen(true)}
-            className="glass hidden h-10 w-10 place-items-center rounded-full transition hover:bg-white/15 sm:grid"
+            className="glass hidden h-10 w-10 shrink-0 place-items-center rounded-full transition hover:bg-white/15 sm:grid"
           >
             <Settings className="h-4 w-4" />
           </button>
@@ -405,13 +353,14 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
             type="button"
             aria-label="Sign out"
             onClick={onSignOut}
-            className="glass hidden h-10 w-10 place-items-center rounded-full transition hover:bg-white/15 sm:grid"
+            className="glass hidden h-10 w-10 shrink-0 place-items-center rounded-full transition hover:bg-white/15 sm:grid"
           >
             <LogOut className="h-4 w-4" />
           </button>
         </header>
 
-        <div className="min-h-0 flex-1">
+        {/* Content views */}
+        <div className="relative min-h-0 flex-1 overflow-hidden">
           {(view.type === "group" || view.type === "dm") && (
             <Conversation
               key={view.type === "dm" ? view.peerId : "group"}
@@ -445,7 +394,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
             />
           )}
 
-          {view.type === "youtube" && <YouTubePanel />}
+          {view.type === "youtube" && <YouTubePanel onOpenMenu={() => setNavOpen(true)} />}
 
           {view.type === "profile" && profiles[view.userId] && (
             <ProfilePage
