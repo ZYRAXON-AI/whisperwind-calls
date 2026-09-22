@@ -10,6 +10,7 @@ import {
   Phone,
   Play,
   Settings,
+  Shield,
   UserPlus,
   Users,
   Video as VideoIcon,
@@ -50,8 +51,9 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
   const [installPrompt, setInstallPrompt] = useState<any>(null);
 
   const call = useCall(user.id);
+  const isGuest = user.email?.endsWith("@guest.local") || false;
 
-  // Capture PWA install prompt
+  // Capture PWA install prompt for mobile & desktop
   useEffect(() => {
     const handler = (e: any) => {
       e.preventDefault();
@@ -227,8 +229,9 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
           </div>
           <div className="min-w-0 flex-1">
             <p className="truncate text-base font-semibold leading-tight">Zyraxon</p>
-            <p className="truncate text-xs text-muted-foreground">
-              {me?.display_name ?? "You"}
+            <p className="truncate text-xs text-muted-foreground flex items-center gap-1">
+              {isGuest && <Shield className="h-3 w-3 text-amber-400 shrink-0" />}
+              {me?.display_name ?? (isGuest ? "Guest User" : "You")}
             </p>
           </div>
           <button
@@ -240,6 +243,12 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
             <X className="h-4 w-4" />
           </button>
         </div>
+
+        {isGuest && (
+          <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-300">
+            No-Cloud Mode: Chat and media will not be saved to cloud database.
+          </div>
+        )}
 
         <nav className="flex flex-col gap-1">
           <button type="button" className={navItem(view.type === "group")} onClick={() => go({ type: "group" })}>
