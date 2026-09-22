@@ -19,10 +19,14 @@ export function useCall(userId: string | null) {
   const [camOn, setCamOn] = useState(true);
   const [sharingScreen, setSharingScreen] = useState(false);
   const [peerSharingScreen, setPeerSharingScreen] = useState(false);
-  const [sharingAudio, setSharingAudio] = useState(false);
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+
+  const statusRef = useRef<CallStatus>("idle");
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   const channelRef = useRef<RealtimeChannel | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -30,7 +34,6 @@ export function useCall(userId: string | null) {
   const camTrackRef = useRef<MediaStreamTrack | null>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenRef = useRef<MediaStream | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
   const pendingOffer = useRef<RTCSessionDescriptionInit | null>(null);
   const pendingIce = useRef<RTCIceCandidateInit[]>([]);
 
@@ -39,25 +42,28 @@ export function useCall(userId: string | null) {
   }, []);
 
   const cleanup = useCallback(() => {
-    pcRef.current?.getSenders().forEach((s) => s.track?.stop());
+    pcRef.current?.getSenders().forEach((s) => {
+      try {
+        s.track?.stop();
+      } catch {}
+    });
     pcRef.current?.close();
     pcRef.current = null;
+
     localRef.current?.getTracks().forEach((t) => t.stop());
     screenRef.current?.getTracks().forEach((t) => t.stop());
-    audioCtxRef.current?.close().catch(() => {});
-    audioCtxRef.current = null;
     localRef.current = null;
     screenRef.current = null;
     camTrackRef.current = null;
     micTrackRef.current = null;
     pendingOffer.current = null;
     pendingIce.current = [];
+
     setLocalStream(null);
     setRemoteStream(null);
     setStatus("idle");
     setSharingScreen(false);
     setPeerSharingScreen(false);
-    setSharingAudio(false);
     setMicOn(true);
     setCamOn(true);
   }, []);
@@ -67,7 +73,6 @@ export function useCall(userId: string | null) {
     const remote = new MediaStream();
     setRemoteStream(remote);
 
-    // সবসময় অডিও ও ভিডিও উভয়ের ট্রান্সসিভার রেডি রাখা
     pc.addTransceiver("audio", { direction: "sendrecv" });
     pc.addTransceiver("video", { direction: "sendrecv" });
 
@@ -106,8 +111,7 @@ export function useCall(userId: string | null) {
       camTrackRef.current = stream.getVideoTracks()[0] ?? null;
       setLocalStream(stream);
       return stream;
-    } catch (err) {
-      // যদি ক্যামেরা পারমিশন না থাকে শুধু অডিও নিয়ে ব্যাকআপ
+    } catch {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       localRef.current = stream;
       micTrackRef.current = stream.getAudioTracks()[0] ?? null;
@@ -124,19 +128,17 @@ export function useCall(userId: string | null) {
       const stream = await getLocal(video);
       const pc = createPeer();
 
-      // অডিও ও ভিডিও ট্র্যাক সেন্ডারে যুক্ত করা
       const senders = pc.getSenders();
       const audioTrack = stream.getAudioTracks()[0];
       const videoTrack = stream.getVideoTracks()[0];
 
       if (audioTrack) {
-        const audioSender = senders.find((s) => s.track?.kind === "audio" || (!s.track && s.init?.direction?.includes("send")));
+        const audioSender = senders.find((s) => s.track?.kind === "audio");
         if (audioSender) await audioSender.replaceTrack(audioTrack);
         else pc.addTrack(audioTrack, stream);
       }
-
       if (videoTrack) {
-        const videoSender = senders.find((s) => s.track?.kind === "video" || (!s.track && s.init?.direction?.includes("send")));
+        const videoSender = senders.find((s) => s.track?.kind === "video");
         if (videoSender) await videoSender.replaceTrack(videoTrack);
         else pc.addTrack(videoTrack, stream);
       }
@@ -198,27 +200,25 @@ export function useCall(userId: string | null) {
     setCamOn(t.enabled);
   }, []);
 
-  // স্ক্রিন শেয়ার বন্ধ করা
   const stopScreenShare = useCallback(async () => {
     const pc = pcRef.current;
     screenRef.current?.getTracks().forEach((t) => t.stop());
     screenRef.current = null;
     setSharingScreen(false);
 
-    const sender = pc?.getSenders().find((s) => s.track?.kind === "video" || s.init?.direction?.includes("send"));
+    const sender = pc?.getSenders().find((s) => s.track?.kind === "video");
     if (sender) {
       await sender.replaceTrack(camTrackRef.current ?? null);
     }
     send("screen_status", { from: userId, sharing: false });
   }, [send, userId]);
 
-  // ফুল কোয়ালিটি স্ক্রিন শেয়ার (ডেস্কটপ, লিনাক্স এবং সমর্থিত মোবাইল)
   const shareScreen = useCallback(async () => {
     const pc = pcRef.current;
     if (!pc) return;
 
     if (!navigator.mediaDevices?.getDisplayMedia) {
-      alert("Screen sharing is not supported on this mobile browser. Please use Chrome on Desktop/Android.");
+      alert("Screen sharing is not supported on this device. Please use Chrome on Desktop or Android.");
       return;
     }
 
@@ -233,7 +233,7 @@ export function useCall(userId: string | null) {
       if (!track) return;
       track.contentHint = "detail";
 
-      const sender = pc.getSenders().find((s) => s.track?.kind === "video" || s.init?.direction?.includes("send"));
+      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
       if (sender) {
         await sender.replaceTrack(track);
       } else {
@@ -247,18 +247,18 @@ export function useCall(userId: string | null) {
         void stopScreenShare();
       };
     } catch {
-      // User cancelled
+      // User cancelled picker
     }
   }, [send, stopScreenShare, userId]);
 
-  // রিয়েল-টাইম সিগন্যালিং চ্যানেল
+  // রিয়েল-টাইম চ্যানেল (এখানে status রি-ট্রিগার বন্ধ করা হয়েছে)
   useEffect(() => {
     if (!userId) return;
     const channel = supabase.channel("zyraxon-room", { config: { broadcast: { self: false } } });
 
     channel
       .on("broadcast", { event: "offer" }, ({ payload }) => {
-        if (status !== "idle") return;
+        if (statusRef.current !== "idle") return;
         pendingOffer.current = payload.sdp;
         setIncomingVideo(Boolean(payload.video));
         setStatus("incoming");
@@ -291,7 +291,7 @@ export function useCall(userId: string | null) {
       supabase.removeChannel(channel);
       cleanup();
     };
-  }, [cleanup, status, userId]);
+  }, [cleanup, userId]);
 
   return {
     status,
@@ -301,7 +301,6 @@ export function useCall(userId: string | null) {
     camOn,
     sharingScreen,
     peerSharingScreen,
-    sharingAudio,
     localStream,
     remoteStream,
     startCall,
