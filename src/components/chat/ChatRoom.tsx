@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bell,
   Circle,
+  Download,
   Heart,
   LogOut,
   Menu,
@@ -45,7 +46,33 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
   const [profileOpen, setProfileOpen] = useState(false);
   const [avatarSrc, setAvatarSrc] = useState("");
   const [navOpen, setNavOpen] = useState(false);
+  const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(new Set());
+  const [installPrompt, setInstallPrompt] = useState<any>(null);
+
   const call = useCall(user.id);
+
+  // Capture PWA install prompt
+  useEffect(() => {
+    const handler = (e: any) => {
+      e.preventDefault();
+      setInstallPrompt(e);
+    };
+    window.addEventListener("beforeinstallprompt", handler);
+    return () => window.removeEventListener("beforeinstallprompt", handler);
+  }, []);
+
+  async function handleInstallApp() {
+    if (!installPrompt) {
+      toast("To install, tap your browser's menu (⋮) and select 'Add to Home screen' or 'Install'.");
+      return;
+    }
+    installPrompt.prompt();
+    const { outcome } = await installPrompt.userChoice;
+    if (outcome === "accepted") {
+      setInstallPrompt(null);
+      toast.success("Zyraxon installed successfully!");
+    }
+  }
 
   const loadProfiles = useCallback(async () => {
     const { data } = await supabase
@@ -77,6 +104,31 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
     unlockSound();
   }, [loadProfiles, loadFriendships]);
 
+  // Realtime Presence tracking
+  useEffect(() => {
+    const presenceChannel = supabase.channel("zyraxon-online-status", {
+      config: { presence: { key: user.id } },
+    });
+
+    presenceChannel
+      .on("presence", { event: "sync" }, () => {
+        const state = presenceChannel.presenceState();
+        const activeIds = new Set<string>(Object.keys(state));
+        setOnlineUserIds(activeIds);
+      })
+      .subscribe(async (status) => {
+        if (status === "SUBSCRIBED") {
+          await presenceChannel.track({
+            online_at: new Date().toISOString(),
+          });
+        }
+      });
+
+    return () => {
+      supabase.removeChannel(presenceChannel);
+    };
+  }, [user.id]);
+
   useEffect(() => {
     const channel = supabase
       .channel("zyraxon-social")
@@ -88,7 +140,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
         const row = payload.new as Friendship | null;
         if (payload.eventType === "INSERT" && row?.addressee_id === user.id) {
           playMessageSound();
-          toast("New friend request");
+          toast("New friend request received");
         }
       })
       .subscribe();
@@ -97,7 +149,6 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
     };
   }, [loadProfiles, loadFriendships, user.id]);
 
-  // Ring while a call is coming in — works even if this tab is in the background.
   useEffect(() => {
     if (call.status === "incoming") startRingtone();
     else stopRingtone();
@@ -108,7 +159,6 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
   const friends = friendIds.map((id) => profiles[id]).filter(Boolean) as Profile[];
   const requests = friendships.filter((f) => f.status === "pending" && f.addressee_id === user.id);
   const me = profiles[user.id];
-  const online = call.peerOnline > 0;
 
   async function addFriend(id: string) {
     const { error } = await supabase
@@ -146,6 +196,8 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
     }`;
 
   const peer = view.type === "dm" ? profiles[view.peerId] : null;
+  const isPeerOnline = peer ? onlineUserIds.has(peer.id) : call.peerOnline > 0;
+
   const headerTitle =
     view.type === "dm"
       ? (peer?.display_name ?? "Chat")
@@ -209,24 +261,48 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
           </button>
         </nav>
 
+        {/* Install Desktop / Mobile App Button */}
+        <button
+          type="button"
+          onClick={handleInstallApp}
+          className="glass flex items-center gap-2.5 rounded-2xl border border-pink-500/30 px-3.5 py-2 text-xs font-semibold text-pink-300 transition hover:bg-pink-500/20"
+        >
+          <Download className="h-4 w-4" /> Install App to Device
+        </button>
+
         <div className="scroll-soft mt-1 flex-1 overflow-y-auto">
           <p className="px-3 pb-2 text-[11px] uppercase tracking-wider text-muted-foreground">
             Your people
           </p>
           <div className="flex flex-col gap-1">
-            {friends.map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                onClick={() => go({ type: "dm", peerId: f.id })}
-                className={`flex items-center gap-3 rounded-2xl px-3 py-2 text-left transition ${
-                  view.type === "dm" && view.peerId === f.id ? "bg-white/15" : "hover:bg-white/10"
-                }`}
-              >
-                <Avatar profile={f} className="h-9 w-9" />
-                <span className="truncate text-sm">{f.display_name}</span>
-              </button>
-            ))}
+            {friends.map((f) => {
+              const friendOnline = onlineUserIds.has(f.id);
+              return (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => go({ type: "dm", peerId: f.id })}
+                  className={`flex items-center gap-3 rounded-2xl px-3 py-2 text-left transition ${
+                    view.type === "dm" && view.peerId === f.id ? "bg-white/15" : "hover:bg-white/10"
+                  }`}
+                >
+                  <div className="relative">
+                    <Avatar profile={f} className="h-9 w-9" />
+                    <span
+                      className={`absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2 border-background ${
+                        friendOnline ? "bg-emerald-400" : "bg-zinc-500"
+                      }`}
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{f.display_name}</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {friendOnline ? "Online" : "Offline"}
+                    </p>
+                  </div>
+                </button>
+              );
+            })}
             {friends.length === 0 && (
               <button
                 type="button"
@@ -245,7 +321,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
           className="glass flex items-center gap-3 rounded-2xl px-3 py-2.5 text-left"
         >
           <Avatar profile={me} className="h-9 w-9" />
-          <span className="truncate text-sm">My profile</span>
+          <span className="truncate text-sm font-medium">My profile</span>
         </button>
       </aside>
 
@@ -284,9 +360,11 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
             <h1 className="truncate text-base font-semibold leading-tight">{headerTitle}</h1>
             <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Circle
-                className={`h-2 w-2 ${online ? "fill-emerald-400 text-emerald-400" : "fill-muted-foreground text-muted-foreground"}`}
+                className={`h-2 w-2 ${
+                  isPeerOnline ? "fill-emerald-400 text-emerald-400" : "fill-muted-foreground text-muted-foreground"
+                }`}
               />
-              {online ? "Online now" : "Offline"}
+              {isPeerOnline ? "Online now" : "Offline"}
             </p>
           </div>
 
@@ -353,7 +431,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
               requests={requests}
               profiles={profiles}
               onAccept={(id) => void acceptRequest(id)}
-              onDecline={(id) => void removeFriendship(id)}
+              onReject={(id) => void removeFriendship(id)}
               onOpenProfile={(id) => go({ type: "profile", userId: id })}
             />
           )}
@@ -362,10 +440,10 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
 
           {view.type === "profile" && profiles[view.userId] && (
             <ProfilePage
-              profile={profiles[view.userId] as Profile}
+              profile={profiles[view.userId]}
               me={user.id}
               friendships={friendships}
-              friendCount={view.userId === user.id ? friendIds.length : 0}
+              friendCount={friends.length}
               onBack={() => go({ type: "group" })}
               onAdd={(id) => void addFriend(id)}
               onAccept={(id) => void acceptRequest(id)}
@@ -375,15 +453,19 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
         </div>
       </div>
 
-      <CallPanel call={call} />
+      {/* Video/Audio Call Overlay */}
+      {call.status !== "idle" && (
+        <CallPanel call={call} peerName={peer?.display_name ?? "Partner"} />
+      )}
 
+      {/* Profile edit modal */}
       {me && (
         <ProfileDialog
           open={profileOpen}
           onOpenChange={setProfileOpen}
           profile={me}
-          avatarSrc={avatarSrc}
-          onSaved={loadProfiles}
+          avatarUrl={avatarSrc}
+          onSaved={() => void loadProfiles()}
         />
       )}
     </div>
