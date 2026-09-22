@@ -1,121 +1,73 @@
 import { useState } from "react";
-import { ExternalLink, Play, Search, Music2, Sparkles, Volume2 } from "lucide-react";
+import { Search, ExternalLink } from "lucide-react";
 
-// সরাসরি এম্বেডেবল ১০০% কার্যক্ষম ভেরিফায়েড ভিডিও ও লাইভ স্ট্রিম
-const CATEGORIES = [
-  { label: "🎵 Lo-Fi Beats", videoId: "jfKfP4vpt88" }, // Official 24/7 lofi stream
-  { label: "💖 Romantic Love", videoId: "4xDzrJKXOOY" }, // Romantic acoustic stream
-  { label: "🇧🇩 Bangla Hits", videoId: "kffacxfA7G4" }, // Top hits
-  { label: "🌙 Night Chill", videoId: "5qap5aO4i9A" }, // Lofi Girl stream
-  { label: "🎸 Acoustic", videoId: "DWcJFNfaw9c" },
-];
+export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
+  const [query, setQuery] = useState("");
+  // নির্ভরযোগ্য এবং লাইভ ১০০% কার্যকরী ইউটিউব এম্বেড
+  const [embedUrl, setEmbedUrl] = useState("https://www.youtube-nocookie.com/embed/5qap5aO4i9A?autoplay=1");
 
-function toEmbed(input: string): string {
-  const value = input.trim();
-  if (!value) return "https://www.youtube-nocookie.com/embed/5qap5aO4i9A?autoplay=1&enablejsapi=1";
+  function handleSearch(e: React.FormEvent) {
+    e.preventDefault();
+    const val = query.trim();
+    if (!val) return;
 
-  // সরাসরি ইউটিউব ভিডিও আইডি এক্সট্র্যাক্ট
-  const idMatch =
-    value.match(/[?&]v=([\w-]{11})/) ||
-    value.match(/youtu\.be\/([\w-]{11})/) ||
-    value.match(/shorts\/([\w-]{11})/) ||
-    value.match(/^([\w-]{11})$/);
+    const idMatch =
+      val.match(/[?&]v=([\w-]{11})/) ||
+      val.match(/youtu\.be\/([\w-]{11})/) ||
+      val.match(/^([\w-]{11})$/);
 
-  if (idMatch) {
-    return `https://www.youtube-nocookie.com/embed/${idMatch[1]}?autoplay=1&enablejsapi=1`;
+    if (idMatch) {
+      setEmbedUrl(`https://www.youtube-nocookie.com/embed/${idMatch[1]}?autoplay=1`);
+    } else {
+      setEmbedUrl(`https://www.youtube-nocookie.com/embed?listType=search&list=${encodeURIComponent(val)}&autoplay=1`);
+    }
   }
-
-  const listMatch = value.match(/[?&]list=([\w-]+)/);
-  if (listMatch) {
-    return `https://www.youtube-nocookie.com/embed/videoseries?list=${listMatch[1]}&autoplay=1`;
-  }
-
-  // গানের নাম বা কিওয়ার্ড লিখলে সরাসরি সার্চ রেজাল্ট এম্বেডার
-  return `https://www.youtube-nocookie.com/embed?listType=search&list=${encodeURIComponent(value)}&autoplay=1`;
-}
-
-export function YouTubePanel() {
-  const [input, setInput] = useState("");
-  const [src, setSrc] = useState<string>(
-    "https://www.youtube-nocookie.com/embed/5qap5aO4i9A?autoplay=1&enablejsapi=1"
-  );
-  const [activeTitle, setActiveTitle] = useState("🌙 Night Chill (Lo-Fi 24/7 Live)");
 
   return (
-    <div className="flex h-full flex-col gap-3 p-3">
-      {/* সার্চ ও লিংক প্লেয়ার বার */}
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (input.trim()) {
-            setSrc(toEmbed(input));
-            setActiveTitle(`Playing: ${input.trim()}`);
-          }
-        }}
-        className="glass-strong flex items-center gap-2 rounded-3xl p-2 shadow-lg"
-      >
-        <div className="relative flex-1">
+    <div className="flex h-full w-full flex-col overflow-hidden bg-black/40">
+      {/* Top Search & Actions */}
+      <div className="flex items-center gap-2 border-b border-white/10 p-3 backdrop-blur-md">
+        {onOpenMenu && (
+          <button
+            type="button"
+            onClick={onOpenMenu}
+            className="glass grid h-10 w-10 place-items-center rounded-full md:hidden"
+          >
+            ☰
+          </button>
+        )}
+        <form onSubmit={handleSearch} className="relative flex-1">
           <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="যেকোনো গান, শিল্পী বা YouTube লিংক লিখুন…"
-            className="w-full rounded-2xl bg-input pl-10 pr-4 py-2.5 text-sm outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring/40"
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search YouTube or paste video link…"
+            className="w-full rounded-full bg-white/10 px-4 py-2 pl-10 text-sm text-white placeholder-white/50 outline-none backdrop-blur-sm focus:ring-2 focus:ring-primary/50"
           />
-          <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-        </div>
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-white/50" />
+        </form>
 
-        <button
-          type="submit"
-          className="gradient-romance grid h-10 w-10 place-items-center rounded-full text-primary-foreground shadow transition hover:scale-105 active:scale-95"
-          aria-label="Play"
-        >
-          <Play className="h-4 w-4 fill-current" />
-        </button>
         <a
           href="https://www.youtube.com"
           target="_blank"
           rel="noreferrer"
-          className="glass grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
-          aria-label="Open YouTube in tab"
-          title="Open in YouTube tab"
+          className="glass flex items-center gap-1.5 rounded-full px-3.5 py-2 text-xs font-semibold text-white hover:bg-white/20 transition"
+          title="Open in YouTube"
         >
-          <ExternalLink className="h-4 w-4" />
+          <ExternalLink className="h-3.5 w-3.5" />
+          <span className="hidden sm:inline">YouTube</span>
         </a>
-      </form>
-
-      {/* প্রি-সেট কুইক প্লে বাটন */}
-      <div className="scroll-soft flex items-center gap-2 overflow-x-auto pb-1">
-        {CATEGORIES.map((cat) => (
-          <button
-            key={cat.label}
-            type="button"
-            onClick={() => {
-              setInput("");
-              setSrc(`https://www.youtube-nocookie.com/embed/${cat.videoId}?autoplay=1&enablejsapi=1`);
-              setActiveTitle(cat.label);
-            }}
-            className="glass shrink-0 rounded-2xl px-3.5 py-1.5 text-xs font-semibold transition hover:bg-white/20 active:scale-95"
-          >
-            {cat.label}
-          </button>
-        ))}
       </div>
 
-      {/* প্লেয়িং হেডার */}
-      <div className="flex items-center gap-2 px-2 text-xs text-muted-foreground">
-        <Volume2 className="h-3.5 w-3.5 text-primary animate-pulse" />
-        <span className="truncate font-medium">{activeTitle}</span>
-      </div>
-
-      {/* সরাসরি ইউটিউব লাইভ এম্বেড স্ক্রিন */}
-      <div className="glass-strong relative flex-1 overflow-hidden rounded-3xl shadow-2xl border border-white/10">
+      {/* Full Iframe Embed */}
+      <div className="relative flex-1 w-full bg-black">
         <iframe
-          key={src}
-          src={src}
+          key={embedUrl}
+          src={embedUrl}
           title="YouTube Player"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
           allowFullScreen
-          className="h-full w-full border-0 bg-black/90"
+          className="h-full w-full border-0"
         />
       </div>
     </div>
