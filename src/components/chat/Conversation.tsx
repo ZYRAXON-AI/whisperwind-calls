@@ -29,6 +29,14 @@ export function Conversation({
   const [sending, setSending] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+
+  // রিয়েলটাইম টাইপিং ও সিন (Seen) স্ট্যাটাস
+  const [isPeerTyping, setIsPeerTyping] = useState(false);
+  const [peerSeenMsgId, setPeerSeenMsgId] = useState<string | null>(null);
+  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTypingSentRef = useRef<number>(0);
+  const channelRef = useRef<any>(null);
+
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const belongsHere = useCallback(
@@ -37,10 +45,9 @@ export function Conversation({
         ? (m.sender_id === me && m.recipient_id === peerId) ||
           (m.sender_id === peerId && m.recipient_id === me)
         : m.recipient_id === null,
-    [me, peerId],
+    [me, peerId]
   );
 
-  // Device-local copy so the thread is there instantly, even offline.
   useEffect(() => {
     try {
       const cached = localStorage.getItem(localKey(peerId));
@@ -56,7 +63,7 @@ export function Conversation({
       let query = supabase.from("messages").select("*").order("created_at", { ascending: true }).limit(300);
       query = peerId
         ? query.or(
-            `and(sender_id.eq.${me},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${me})`,
+            `and(sender_id.eq.${me},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${me})`
           )
         : query.is("recipient_id", null);
       const { data } = await query;
@@ -70,14 +77,15 @@ export function Conversation({
   useEffect(() => {
     try {
       localStorage.setItem(localKey(peerId), JSON.stringify(messages.slice(-200)));
-    } catch {
-      /* ignore */
-    }
+    } catch {}
   }, [messages, peerId]);
 
+  // রিয়েলটাইম চ্যানেল (Messages + Typing + Seen)
   useEffect(() => {
-    const channel = supabase
-      .channel(`zyraxon-thread-${peerId ?? "group"}`)
+    const channelName = `zyraxon-thread-${peerId ?? "group"}`;
+    const channel = supabase.channel(channelName);
+
+    channel
       .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, (payload) => {
         if (payload.eventType === "DELETE") {
           const old = payload.old as { id: string };
@@ -97,15 +105,59 @@ export function Conversation({
           return [...prev, msg];
         });
       })
+      .on("broadcast", { event: "typing" }, ({ payload }) => {
+        if (payload.userId !== me) {
+          setIsPeerTyping(true);
+          if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+          typingTimerRef.current = setTimeout(() => {
+            setIsPeerTyping(false);
+          }, 3000);
+        }
+      })
+      .on("broadcast", { event: "message_seen" }, ({ payload }) => {
+        if (payload.readerId !== me && payload.messageId) {
+          setPeerSeenMsgId(payload.messageId);
+        }
+      })
       .subscribe();
+
+    channelRef.current = channel;
+
     return () => {
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
       supabase.removeChannel(channel);
     };
   }, [belongsHere, me, peerId, profiles]);
 
+  // অপর প্রান্তের শেষ মেসেজ দেখলে সাথে সাথে সিন (Seen) ব্রডকাস্ট পাঠানো
+  useEffect(() => {
+    if (!messages.length || !peerId || !channelRef.current) return;
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && lastMsg.sender_id === peerId) {
+      channelRef.current.send({
+        type: "broadcast",
+        event: "message_seen",
+        payload: { readerId: me, messageId: lastMsg.id },
+      });
+    }
+  }, [messages, peerId, me]);
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
+  }, [messages.length, isPeerTyping]);
+
+  // টাইপ করার সময় ব্রডকাস্ট প্রেরণ (থ্রটলিং ১.৫ সেকেন্ড)
+  const notifyTyping = useCallback(() => {
+    const now = Date.now();
+    if (now - lastTypingSentRef.current > 1500 && channelRef.current) {
+      lastTypingSentRef.current = now;
+      channelRef.current.send({
+        type: "broadcast",
+        event: "typing",
+        payload: { userId: me },
+      });
+    }
+  }, [me]);
 
   const send = useCallback(
     async (msg: OutgoingMessage) => {
@@ -131,7 +183,7 @@ export function Conversation({
         setSending(false);
       }
     },
-    [me, peerId],
+    [me, peerId]
   );
 
   async function removeMessage(id: string) {
@@ -149,13 +201,24 @@ export function Conversation({
       .update({ body, edited_at: new Date().toISOString() })
       .eq("id", id);
     if (error) toast.error("Could not edit");
-    else setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, body, edited_at: new Date().toISOString() } : m)));
+    else
+      setMessages((prev) =>
+        prev.map((m) => (m.id === id ? { ...m, body, edited_at: new Date().toISOString() } : m))
+      );
   }
 
   const rows = useMemo(
     () => messages.filter(belongsHere).map((m) => ({ ...m, mine: m.sender_id === me })),
-    [messages, belongsHere, me],
+    [messages, belongsHere, me]
   );
+
+  // আমার পাঠানো সর্বশেষ মেসেজ যা অপর প্রান্ত দেখেছে
+  const lastMineMsg = useMemo(() => {
+    const mineMsgs = rows.filter((r) => r.mine);
+    return mineMsgs.length ? mineMsgs[mineMsgs.length - 1] : null;
+  }, [rows]);
+
+  const peerProfile = peerId ? profiles[peerId] : null;
 
   return (
     <div className="flex h-full flex-col">
@@ -165,88 +228,128 @@ export function Conversation({
             Say the first word. Everything here stays between you.
           </p>
         )}
+
         {rows.map((m) => {
           const author = profiles[m.sender_id];
+          const isSeenTarget =
+            m.mine &&
+            peerId &&
+            lastMineMsg?.id === m.id &&
+            (peerSeenMsgId === m.id || peerSeenMsgId !== null);
+
           return (
-            <div key={m.id} className={`group flex gap-2 ${m.mine ? "flex-row-reverse" : ""}`}>
-              <button type="button" onClick={() => onOpenProfile(m.sender_id)} className="mt-auto">
-                <Avatar profile={author} className="h-8 w-8" />
-              </button>
+            <div key={m.id} className="flex flex-col">
+              <div className={`group flex gap-2 ${m.mine ? "flex-row-reverse" : ""}`}>
+                <button type="button" onClick={() => onOpenProfile(m.sender_id)} className="mt-auto">
+                  <Avatar profile={author} className="h-8 w-8" />
+                </button>
 
-              <div
-                className={`glass max-w-[78%] rounded-3xl px-4 py-2.5 ${m.mine ? "rounded-br-lg" : "rounded-bl-lg"}`}
-              >
-                {!m.mine && (
-                  <p className="mb-1 text-[11px] font-medium text-primary">
-                    {author?.display_name ?? "…"}
-                  </p>
-                )}
+                <div
+                  className={`glass max-w-[78%] rounded-3xl px-4 py-2.5 ${
+                    m.mine ? "rounded-br-lg" : "rounded-bl-lg"
+                  }`}
+                >
+                  {!m.mine && (
+                    <p className="mb-1 text-[11px] font-medium text-primary">
+                      {author?.display_name ?? "…"}
+                    </p>
+                  )}
 
-                {editingId === m.id ? (
-                  <div className="flex items-center gap-2">
-                    <input
-                      value={editText}
-                      onChange={(e) => setEditText(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && void saveEdit(m.id)}
-                      autoFocus
-                      className="min-w-0 flex-1 rounded-xl bg-input px-3 py-1.5 text-sm outline-none"
-                    />
-                    <button type="button" onClick={() => void saveEdit(m.id)} aria-label="Save">
-                      <Check className="h-4 w-4 text-emerald-400" />
-                    </button>
-                    <button type="button" onClick={() => setEditingId(null)} aria-label="Cancel">
-                      <X className="h-4 w-4" />
-                    </button>
-                  </div>
-                ) : m.kind === "text" ? (
-                  <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
-                ) : (
-                  <MediaBubble kind={m.kind} path={m.media_url ?? ""} name={m.media_name} />
-                )}
+                  {editingId === m.id ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={editText}
+                        onChange={(e) => setEditText(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && void saveEdit(m.id)}
+                        autoFocus
+                        className="min-w-0 flex-1 rounded-xl bg-input px-3 py-1.5 text-sm outline-none"
+                      />
+                      <button type="button" onClick={() => void saveEdit(m.id)} aria-label="Save">
+                        <Check className="h-4 w-4 text-emerald-400" />
+                      </button>
+                      <button type="button" onClick={() => setEditingId(null)} aria-label="Cancel">
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ) : m.kind === "text" ? (
+                    <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
+                  ) : (
+                    <MediaBubble kind={m.kind} path={m.media_url ?? ""} name={m.media_name} />
+                  )}
 
-                <div className="mt-1 flex items-center justify-end gap-2">
-                  {m.mine && editingId !== m.id && (
-                    <>
-                      {m.kind === "text" && (
+                  <div className="mt-1 flex items-center justify-end gap-2">
+                    {m.mine && editingId !== m.id && (
+                      <>
+                        {m.kind === "text" && (
+                          <button
+                            type="button"
+                            aria-label="Edit message"
+                            onClick={() => {
+                              setEditingId(m.id);
+                              setEditText(m.body ?? "");
+                            }}
+                            className="text-muted-foreground opacity-0 transition hover:text-foreground group-hover:opacity-100"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                         <button
                           type="button"
-                          aria-label="Edit message"
-                          onClick={() => {
-                            setEditingId(m.id);
-                            setEditText(m.body ?? "");
-                          }}
-                          className="text-muted-foreground opacity-0 transition hover:text-foreground group-hover:opacity-100"
+                          aria-label="Delete message"
+                          onClick={() => void removeMessage(m.id)}
+                          className="text-muted-foreground opacity-0 transition hover:text-destructive group-hover:opacity-100"
                         >
-                          <Pencil className="h-3.5 w-3.5" />
+                          <Trash2 className="h-3.5 w-3.5" />
                         </button>
-                      )}
-                      <button
-                        type="button"
-                        aria-label="Delete message"
-                        onClick={() => void removeMessage(m.id)}
-                        className="text-muted-foreground opacity-0 transition hover:text-destructive group-hover:opacity-100"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </>
-                  )}
-                  <p className="text-[10px] text-muted-foreground">
-                    {m.edited_at ? "edited · " : ""}
-                    {new Date(m.created_at).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </p>
+                      </>
+                    )}
+                    <p className="text-[10px] text-muted-foreground">
+                      {m.edited_at ? "edited · " : ""}
+                      {new Date(m.created_at).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </p>
+                  </div>
                 </div>
               </div>
+
+              {/* ফেসবুক মেসেঞ্জারের মতো মেসেজের নিচে Seen স্ট্যাটাস এবং ছোট প্রোফাইল ছবি */}
+              {isSeenTarget && peerProfile && (
+                <div className="mr-10 mt-1 flex items-center justify-end gap-1.5 animate-fade-in">
+                  <span className="text-[10px] text-muted-foreground">Seen</span>
+                  <div
+                    title={`Seen by ${peerProfile.display_name}`}
+                    className="relative h-4 w-4 overflow-hidden rounded-full ring-1 ring-primary/40"
+                  >
+                    <Avatar profile={peerProfile} className="h-full w-full text-[8px]" />
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
+
+        {/* রিয়েল-টাইম থ্রি-ডট টাইপিং / AI থিংকিং অ্যানিমেশন */}
+        {isPeerTyping && (
+          <div className="flex items-center gap-2 animate-fade-in pl-1">
+            {peerProfile && <Avatar profile={peerProfile} className="h-7 w-7 ring-2 ring-primary/30" />}
+            <div className="glass flex items-center gap-1.5 rounded-2xl px-3.5 py-2 shadow-sm border border-white/10">
+              <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:-0.3s]" />
+              <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:-0.15s]" />
+              <span className="h-2 w-2 rounded-full bg-primary animate-bounce" />
+              <span className="ml-1 text-[11px] font-medium text-muted-foreground">
+                {peerProfile ? `${peerProfile.display_name} is typing…` : "Thinking…"}
+              </span>
+            </div>
+          </div>
+        )}
+
         <div ref={bottomRef} />
       </main>
 
       <div className="mx-auto w-full max-w-3xl px-3 pb-3">
-        <Composer onSend={send} sending={sending} />
+        <Composer onSend={send} sending={sending} onTyping={notifyTyping} />
       </div>
     </div>
   );
