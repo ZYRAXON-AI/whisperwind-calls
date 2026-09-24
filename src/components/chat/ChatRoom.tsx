@@ -152,7 +152,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
     }`;
 
   const peer = view.type === "dm" ? profiles[view.peerId] : null;
-  const isPeerOnline = peer ? onlineUserIds.has(peer.id) : call.peerOnline > 0;
+  const isPeerOnline = peer ? onlineUserIds.has(peer.id) : onlineUserIds.size > 1;
 
   const headerTitle =
     view.type === "dm" ? (peer?.display_name ?? "Chat") :
@@ -389,7 +389,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
               requests={requests}
               profiles={profiles}
               onAccept={(id) => void acceptRequest(id)}
-              onReject={(id) => void removeFriendship(id)}
+              onDecline={(id) => void removeFriendship(id)}
               onOpenProfile={(id) => go({ type: "profile", userId: id })}
             />
           )}
@@ -398,7 +398,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
 
           {view.type === "profile" && profiles[view.userId] && (
             <ProfilePage
-              profile={profiles[view.userId]}
+              profile={profiles[view.userId] as Profile}
               me={user.id}
               friendships={friendships}
               friendCount={friends.length}
@@ -422,7 +422,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
           open={profileOpen}
           onOpenChange={setProfileOpen}
           profile={me}
-          avatarUrl={avatarSrc}
+          avatarSrc={avatarSrc}
           onSaved={() => void loadProfiles()}
         />
       )}
