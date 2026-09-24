@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bell,
   Circle,
@@ -172,11 +172,15 @@ export function ChatRoom({
   }, [loadProfiles, loadFriendships, user.id]);
 
   // Incoming call ringtone (caller-selected) + loud background notify + vibrate
+  const profilesRef = useRef(profiles);
+  useEffect(() => {
+    profilesRef.current = profiles;
+  }, [profiles]);
   useEffect(() => {
     if (call.status === "incoming" && call.incoming) {
       unlockSound();
       startRingtone(call.callerRingtone);
-      const callerName = profiles[call.incoming.callerId]?.display_name ?? "Someone";
+      const callerName = profilesRef.current[call.incoming.callerId]?.display_name ?? "Someone";
       notify(
         `Incoming ${call.incoming.withVideo ? "video" : "audio"} call`,
         `${callerName} is calling you — tap to answer`,
@@ -202,7 +206,7 @@ export function ChatRoom({
         navigator.vibrate?.(0);
       } catch {}
     };
-  }, [call.status, call.callerRingtone, call.incoming, profiles]);
+  }, [call.status, call.callerRingtone, call.incoming]);
 
   const friendIds = useMemo(() => friendIdsOf(friendships, user.id), [friendships, user.id]);
   const friends = friendIds.map((id) => profiles[id]).filter(Boolean) as Profile[];

@@ -32,7 +32,19 @@ const ICE: RTCConfiguration = {
   iceServers: [
     { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
     { urls: ["stun:global.stun.twilio.com:3478"] },
+    { urls: ["stun:stun.cloudflare.com:3478"] },
+    // Free TURN — critical when both peers sit behind strict NAT
+    {
+      urls: [
+        "turn:openrelay.metered.ca:80",
+        "turn:openrelay.metered.ca:443",
+        "turn:openrelay.metered.ca:443?transport=tcp",
+      ],
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
   ],
+  iceCandidatePoolSize: 4,
 };
 
 export type CallStatus = "idle" | "calling" | "incoming" | "connected";
@@ -246,8 +258,29 @@ export function useCall(userId: string | null) {
     [publishRemotes]
   );
 
+  const makeOffer = useCallback(
+    async (peerId: string, iceRestart = false) => {
+      const pc = pcsRef.current.get(peerId);
+      if (!pc) return;
+      if (makingOfferRef.current.has(peerId)) return;
+      if (pc.signalingState !== "stable") return;
+      try {
+        makingOfferRef.current.add(peerId);
+        const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
+        if (pc.signalingState !== "stable") return;
+        await pc.setLocalDescription(offer);
+        send({ to: peerId, kind: "offer", sdp: pc.localDescription });
+      } catch {
+      } finally {
+        makingOfferRef.current.delete(peerId);
+      }
+    },
+    [send]
+  );
+
+  // answerOnly: wait for remote offer before attaching local tracks (avoids m-line glare)
   const createPeer = useCallback(
-    (peerId: string) => {
+    (peerId: string, answerOnly = false) => {
       const existing = pcsRef.current.get(peerId);
       if (existing) return existing;
       if (!userIdRef.current || !localRef.current) return null;
@@ -256,15 +289,19 @@ export function useCall(userId: string | null) {
       const remote = new MediaStream();
       remoteRef.current.set(peerId, remote);
 
-      localRef.current.getTracks().forEach((t) => {
-        try {
-          pc.addTrack(t, localRef.current as MediaStream);
-        } catch {}
-      });
+      if (!answerOnly) {
+        localRef.current.getTracks().forEach((t) => {
+          try {
+            pc.addTrack(t, localRef.current as MediaStream);
+          } catch {}
+        });
+      }
 
-      // Renegotiation path (screen share / track change) — always allowed
+      let answerReady = !answerOnly;
+
       pc.onnegotiationneeded = async () => {
         if (makingOfferRef.current.has(peerId)) return;
+        if (!answerReady) return;
         try {
           makingOfferRef.current.add(peerId);
           if (pc.signalingState !== "stable") return;
@@ -288,6 +325,9 @@ export function useCall(userId: string | null) {
         } else if (e.track) {
           stream.addTrack(e.track);
         }
+        e.track?.addEventListener("unmute", () => {
+          publishRemotes();
+        });
         publishRemotes();
         setStatus((s) => (s === "calling" || s === "incoming" ? "connected" : s));
       };
@@ -298,6 +338,20 @@ export function useCall(userId: string | null) {
 
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === "connected") {
+          answerReady = true;
+          setStatus((s) => (s === "calling" || s === "incoming" ? "connected" : s));
+        }
+        if (pc.connectionState === "failed") {
+          // ICE restart — only the offerer side pushes a new offer
+          if (shouldOfferTo(userIdRef.current ?? "", peerId) && pc.signalingState === "stable") {
+            void makeOffer(peerId, true);
+          }
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+          answerReady = true;
           setStatus((s) => (s === "calling" || s === "incoming" ? "connected" : s));
         }
       };
@@ -305,7 +359,7 @@ export function useCall(userId: string | null) {
       pcsRef.current.set(peerId, pc);
       // If we're already screen-sharing when this peer connects, send the screen track
       const scr = screenRef.current?.getVideoTracks()[0];
-      if (scr) {
+      if (scr && !answerOnly) {
         const vs = pc.getSenders().find((s) => s.track?.kind === "video");
         if (vs) {
           void vs.replaceTrack(scr).catch(() => undefined);
@@ -315,29 +369,16 @@ export function useCall(userId: string | null) {
           } catch {}
         }
       }
+
+      if (answerOnly) {
+        // Expose a one-shot hook so handleSig can flip answerReady after remote answer
+        (pc as RTCPeerConnection & { __markAnswerReady?: () => void }).__markAnswerReady = () => {
+          answerReady = true;
+        };
+      }
       return pc;
     },
-    [publishRemotes, send]
-  );
-
-  const makeOffer = useCallback(
-    async (peerId: string) => {
-      const pc = pcsRef.current.get(peerId);
-      if (!pc) return;
-      if (makingOfferRef.current.has(peerId)) return;
-      if (pc.signalingState !== "stable") return;
-      try {
-        makingOfferRef.current.add(peerId);
-        const offer = await pc.createOffer();
-        if (pc.signalingState !== "stable") return;
-        await pc.setLocalDescription(offer);
-        send({ to: peerId, kind: "offer", sdp: pc.localDescription });
-      } catch {
-      } finally {
-        makingOfferRef.current.delete(peerId);
-      }
-    },
-    [send]
+    [makeOffer, publishRemotes, send]
   );
 
   // Only the lower userId creates the initial peer+offer — no double-offer glare
@@ -350,7 +391,7 @@ export function useCall(userId: string | null) {
         send({ to: peerId, kind: "hello" });
         return;
       }
-      if (!pcsRef.current.has(peerId)) createPeer(peerId);
+      if (!pcsRef.current.has(peerId)) createPeer(peerId, false);
       void makeOffer(peerId);
     },
     [createPeer, makeOffer, send]
@@ -376,9 +417,9 @@ export function useCall(userId: string | null) {
       if (!from || from === userIdRef.current) return;
 
       if (payload.kind === "hello") {
-        // Peer is waiting for our offer
+        // Peer is waiting for our offer — make sure we have a PC with local tracks
         if (shouldOfferTo(userIdRef.current, from)) {
-          if (!pcsRef.current.has(from)) createPeer(from);
+          if (!pcsRef.current.has(from)) createPeer(from, false);
           void makeOffer(from);
         }
         return;
@@ -401,7 +442,8 @@ export function useCall(userId: string | null) {
 
       if (payload.kind === "offer") {
         if (!payload.sdp) return;
-        const pc = pcsRef.current.get(from) ?? createPeer(from);
+        const existingPc = pcsRef.current.get(from);
+        const pc = existingPc ?? createPeer(from, true);
         if (!pc) return;
         try {
           // Perfect negotiation: polite (higher id) rolls back own offer on collision
@@ -411,10 +453,31 @@ export function useCall(userId: string | null) {
             await pc.setLocalDescription({ type: "rollback" });
           }
           await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+          // Attach our mic/cam onto the transceivers the remote offer opened
+          const local = localRef.current;
+          if (local) {
+            const a = local.getAudioTracks()[0];
+            const v = screenRef.current?.getVideoTracks()[0] ?? local.getVideoTracks()[0];
+            for (const tx of pc.getTransceivers()) {
+              const kind = tx.receiver.track?.kind;
+              if (kind === "audio" && a) {
+                try {
+                  await tx.sender.replaceTrack(a);
+                  tx.direction = "sendrecv";
+                } catch {}
+              } else if (kind === "video" && v) {
+                try {
+                  await tx.sender.replaceTrack(v);
+                  tx.direction = "sendrecv";
+                } catch {}
+              }
+            }
+          }
           await drainIce(from);
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
           send({ to: from, kind: "answer", sdp: pc.localDescription });
+          (pc as RTCPeerConnection & { __markAnswerReady?: () => void }).__markAnswerReady?.();
           if (callIdRef.current) void setCallActive(callIdRef.current).catch(() => undefined);
           setStatus((s) => (s === "calling" || s === "incoming" || s === "connected" ? "connected" : s));
         } catch {}
@@ -428,6 +491,7 @@ export function useCall(userId: string | null) {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
           await drainIce(from);
+          (pc as RTCPeerConnection & { __markAnswerReady?: () => void }).__markAnswerReady?.();
           if (callIdRef.current) void setCallActive(callIdRef.current).catch(() => undefined);
           setStatus((s) => (s === "calling" || s === "incoming" || s === "connected" ? "connected" : s));
         } catch {}
@@ -803,6 +867,16 @@ export function useCall(userId: string | null) {
             payload: { from: userId, callId },
           });
         } catch {}
+        // Kick discovery right away — don't wait for DB round-trips
+        const chNow = callChannelRef.current;
+        if (chNow) {
+          const st = chNow.presenceState() as Record<string, { userId?: string }[]>;
+          for (const key of Object.keys(st)) {
+            for (const e of st[key] ?? []) {
+              if (e?.userId && e.userId !== userId) discoverPeer(e.userId);
+            }
+          }
+        }
         void logCallEvent(`${video ? "Video" : "Audio"} call started`, peerIdRef.current);
 
         const announceRow: CallRow =
@@ -1057,7 +1131,7 @@ export function useCall(userId: string | null) {
           }
         }
       }
-    }, 2500);
+    }, 1200);
     return () => window.clearInterval(t);
   }, [status, userId, discoverPeer]);
 

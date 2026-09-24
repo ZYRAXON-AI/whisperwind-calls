@@ -194,15 +194,21 @@ function stopYoutubeRingtone() {
 
 // Play the caller-selected ringtone (preset id or yt:VIDEOID)
 export function startRingtone(presetId?: string) {
-  if (ringTimer) return;
+  const id = presetId || getSavedRingtone();
+  // Restart when the caller changes the tone — never stick on the old preset
+  if (ringTimer) {
+    stopRingtone();
+  }
   unlockSound();
   const c = audio();
   if (c && c.state === "suspended") void c.resume();
-  const id = presetId || getSavedRingtone();
 
   // YouTube ringtone
   if (id.startsWith("yt:")) {
     playYoutubeRingtone(id.slice(3));
+    ringTimer = setInterval(() => {
+      playYoutubeRingtone(id.slice(3));
+    }, 12000);
     return;
   }
 

@@ -36,6 +36,20 @@ function Stream({
   return <video ref={ref} autoPlay playsInline muted={muted} className={className} />;
 }
 
+// Remote audio MUST live on its own element — audio-only tiles only show avatars
+function RemoteAudio({ stream }: { stream: MediaStream | null | undefined }) {
+  const ref = useRef<HTMLAudioElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.srcObject = stream ?? null;
+    el.autoplay = true;
+    if (stream) void el.play().catch(() => undefined);
+  }, [stream]);
+  if (!stream) return null;
+  return <audio ref={ref} autoPlay playsInline />;
+}
+
 function hasVideoTrack(stream: MediaStream | null | undefined) {
   return Boolean(stream?.getVideoTracks().length);
 }
@@ -110,6 +124,11 @@ export function CallPanel({
 
   if (call.status === "idle") return null;
 
+  // Always pump remote audio — video tiles already play sound, audio-only needs this
+  const remoteAudioNodes = remoteIds.map((id) => (
+    <RemoteAudio key={`audio-${id}`} stream={call.remoteStreams[id]} />
+  ));
+
   // Incoming Call Dialog
   if (call.status === "incoming") {
     const fromName = callerName ?? (call.incoming ? profiles[call.incoming.callerId]?.display_name : undefined) ?? peerName;
@@ -125,6 +144,7 @@ export function CallPanel({
           </h2>
           <p className="mt-1 text-xs text-muted-foreground">{fromName} is calling you…</p>
           <div className="mt-8 flex justify-center gap-6">
+            {remoteAudioNodes}
             <button
               type="button"
               disabled={busy !== null}
@@ -242,6 +262,7 @@ export function CallPanel({
     const firstRemote = firstId ? call.remoteStreams[firstId] : undefined;
     return (
       <div className="fixed bottom-20 right-4 z-50 flex w-72 flex-col overflow-hidden rounded-3xl border border-white/20 bg-background/95 p-3 shadow-2xl backdrop-blur-2xl">
+        {remoteAudioNodes}
         <div className="flex items-center justify-between pb-2 border-b border-white/10">
           <div className="flex items-center gap-2">
             <span className="h-2.5 w-2.5 rounded-full bg-green-500 animate-pulse" />
@@ -313,6 +334,7 @@ export function CallPanel({
   // Fullscreen Call Window — video grid or audio avatar grid
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-black/90 backdrop-blur-2xl">
+      {remoteAudioNodes}
       <div className="flex items-center justify-between px-6 pt-4 pb-2">
         <div className="flex items-center gap-2 text-sm text-white/80">
           <span className="h-2.5 w-2.5 rounded-full bg-green-500 animate-ping" />
