@@ -199,7 +199,8 @@ export function ChatRoom({
         if (!isGroup && !isDmToMe) return;
         const key = isGroup ? "group" : m.sender_id;
         const onScreen =
-          viewRef.current.type === "group" || (viewRef.current.type === "dm" && viewRef.current.peerId === m.sender_id);
+          (isGroup && viewRef.current.type === "group") ||
+          (!isGroup && viewRef.current.type === "dm" && viewRef.current.peerId === m.sender_id);
         if (onScreen) return;
         setUnread((prev) => ({ ...prev, [key]: (prev[key] ?? 0) + 1 }));
       })
@@ -391,7 +392,7 @@ export function ChatRoom({
       {navOpen && (
         <div
           onClick={() => setNavOpen(false)}
-          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm transition-opacity md:hidden"
+          className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px] transition-opacity md:hidden"
         />
       )}
 

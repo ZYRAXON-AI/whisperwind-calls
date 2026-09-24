@@ -94,14 +94,14 @@
 @utility glass {
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
-  backdrop-filter: blur(22px) saturate(160%);
+  backdrop-filter: blur(10px) saturate(140%);
   box-shadow: var(--shadow-glass);
 }
 
 @utility glass-strong {
   background: var(--glass-strong);
   border: 1px solid var(--glass-border);
-  backdrop-filter: blur(34px) saturate(180%);
+  backdrop-filter: blur(14px) saturate(150%);
   box-shadow: var(--shadow-glass);
 }
 

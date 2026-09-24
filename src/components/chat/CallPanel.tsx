@@ -165,7 +165,7 @@ export function CallPanel({
   if (call.status === "incoming") {
     const fromName = callerName ?? (call.incoming ? profiles[call.incoming.callerId]?.display_name : undefined) ?? peerName;
     return (
-      <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-5 backdrop-blur-md">
+      <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 px-5 backdrop-blur-sm">
         <div className="glass-strong glow w-full max-w-sm rounded-3xl p-8 text-center animate-bounce-short">
           <div className="relative mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/20 text-primary">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/40 opacity-75" />
@@ -293,7 +293,7 @@ export function CallPanel({
     const firstId = remoteIds[0];
     const firstRemote = firstId ? call.remoteStreams[firstId] : undefined;
     return (
-      <div className="fixed bottom-20 right-4 z-50 flex w-72 flex-col overflow-hidden rounded-3xl border border-white/20 bg-background/95 p-3 shadow-2xl backdrop-blur-2xl">
+      <div className="fixed bottom-20 right-4 z-50 flex w-72 flex-col overflow-hidden rounded-3xl border border-white/20 bg-background/95 p-3 shadow-2xl backdrop-blur-sm">
         {remoteAudioNodes}
         <div className="flex items-center justify-between pb-2 border-b border-white/10">
           <div className="flex items-center gap-2">
@@ -365,7 +365,7 @@ export function CallPanel({
 
   // Fullscreen Call Window — video grid or audio avatar grid
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black/90 backdrop-blur-2xl">
+    <div className="fixed inset-0 z-50 flex flex-col bg-black/85 backdrop-blur-sm">
       {remoteAudioNodes}
       <div className="flex items-center justify-between px-6 pt-4 pb-2">
         <div className="flex items-center gap-2 text-sm text-white/80">

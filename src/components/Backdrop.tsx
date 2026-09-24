@@ -50,8 +50,8 @@ export function Backdrop() {
           }`}
         />
       ))}
-      <div className="absolute -left-40 top-[-10%] h-[36rem] w-[36rem] rounded-full bg-primary/15 blur-[140px]" />
-      <div className="absolute -right-32 bottom-[-15%] h-[34rem] w-[34rem] rounded-full bg-accent/25 blur-[150px]" />
+      <div className="absolute -left-40 top-[-10%] h-[36rem] w-[36rem] rounded-full bg-primary/10 blur-[70px]" />
+      <div className="absolute -right-32 bottom-[-15%] h-[34rem] w-[34rem] rounded-full bg-accent/15 blur-[80px]" />
     </div>
   );
 }

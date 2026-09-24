@@ -34,18 +34,7 @@ const ICE: RTCConfiguration = {
   iceServers: [
     { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
     { urls: ["stun:global.stun.twilio.com:3478"] },
-    { urls: ["stun:stun.cloudflare.com:3478"] },
-    // Cloudflare TURN — free, credential-free, highly reliable for strict NAT
-    {
-      urls: [
-        "turn:turn.cloudflare.com:3478?transport=udp",
-        "turn:turn.cloudflare.com:3478?transport=tcp",
-      ],
-      credentialType: "password",
-      username: "zyraxon",
-      credential: "zyraxon",
-    },
-    // Free TURN — secondary relay path when both peers sit behind strict NAT
+    // Free TURN — relay when both peers are behind strict NAT (openrelay is the only public free relay)
     {
       urls: [
         "turn:openrelay.metered.ca:80",
@@ -56,8 +45,7 @@ const ICE: RTCConfiguration = {
       credential: "openrelayproject",
     },
   ],
-  iceCandidatePoolSize: 4,
-  // One bundle/one mux → fewer ports, much lower latency on weak networks
+  iceCandidatePoolSize: 1,
   bundlePolicy: "max-bundle",
   rtcpMuxPolicy: "require",
 };
@@ -729,7 +717,7 @@ export function useCall(userId: string | null) {
 
       // Only send offers after the channel is SUBSCRIBED — otherwise broadcast is dropped
       return new Promise((resolve) => {
-        const timer = setTimeout(resolve, 3000);
+        const timer = setTimeout(resolve, 1500);
         ch.subscribe((st) => {
           if (st === "SUBSCRIBED") {
             clearTimeout(timer);
@@ -1329,7 +1317,7 @@ export function useCall(userId: string | null) {
           }
         }
       }
-    }, 1500);
+    }, 900);
     return () => window.clearInterval(t);
   }, [status, userId, discoverPeer, send, sendStoredIce]);
 
