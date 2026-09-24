@@ -3,14 +3,18 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 import {
   type CallRow,
+  broadcastInviteCancel,
   countJoinedMembers,
   createCall,
   endCallRoom,
+  ensurePersonalInviteInbox,
   fetchMyOpenCalls,
   getJoinedPeers,
   setCallActive,
   setMemberState,
+  stopInviteRing,
   subscribeCallInvites,
+  subscribeInviteCancels,
 } from "@/lib/calls";
 
 const ICE: RTCConfiguration = {
@@ -92,6 +96,7 @@ export function useCall(userId: string | null) {
   const statusRef = useRef<CallStatus>("idle");
   const userIdRef = useRef<string | null>(userId);
   const callIdRef = useRef<string | null>(null);
+  const incomingRef = useRef<IncomingCall | null>(null);
 
   const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteRef = useRef<Map<string, MediaStream>>(new Map());
@@ -110,6 +115,9 @@ export function useCall(userId: string | null) {
   useEffect(() => {
     userIdRef.current = userId;
   }, [userId]);
+  useEffect(() => {
+    incomingRef.current = incoming;
+  }, [incoming]);
 
   const publishRemotes = useCallback(() => {
     const obj: Record<string, MediaStream> = {};
@@ -280,6 +288,7 @@ export function useCall(userId: string | null) {
   );
 
   const localCleanup = useCallback(() => {
+    const endedId = callIdRef.current;
     Array.from(pcsRef.current.keys()).forEach((id) => closePeer(id));
     const ch = callChannelRef.current;
     if (ch) {
@@ -303,6 +312,10 @@ export function useCall(userId: string | null) {
     screenRef.current = null;
     camTrackRef.current = null;
     micTrackRef.current = null;
+    if (endedId) {
+      stopInviteRing(endedId);
+      if (userIdRef.current) broadcastInviteCancel(endedId, userIdRef.current);
+    }
     callIdRef.current = null;
     remoteRef.current.clear();
     pendingIceRef.current.clear();
@@ -425,7 +438,7 @@ export function useCall(userId: string | null) {
     [localCleanup, userId]
   );
 
-  // realtime invites (broadcast bus) + call status + initial load
+  // realtime invites (broadcast bus + personal inbox) + call status + initial load
   useEffect(() => {
     if (!userId) return;
     const refresh = () => {
@@ -440,12 +453,17 @@ export function useCall(userId: string | null) {
       .on("postgres_changes", { event: "*", schema: "public", table: "calls" }, refresh)
       .subscribe();
 
-    // Realtime invite bus — rings even when calls/call_members tables are missing
-    const offInvite = subscribeCallInvites((inv) => {
+    const handleInvite = (inv: {
+      to?: string;
+      callId: string;
+      callerId: string;
+      withVideo: boolean;
+      ringtone: string;
+    }) => {
       if (inv.to && inv.to !== userId) return;
       if (inv.callerId === userId) return;
       if (inv.callId === callIdRef.current) return;
-      if (statusRef.current !== "idle" && statusRef.current !== "incoming") return;
+      if (statusRef.current === "calling" || statusRef.current === "connected") return;
       setIncoming({
         callId: inv.callId,
         callerId: inv.callerId,
@@ -455,11 +473,25 @@ export function useCall(userId: string | null) {
       setIncomingVideo(inv.withVideo);
       setCallerRingtone(inv.ringtone);
       setStatus("incoming");
-    });
+    };
+
+    const handleCancel = (c: { callId: string }) => {
+      if (incomingRef.current?.callId === c.callId) {
+        setIncoming(null);
+        setIncomingVideo(false);
+        if (statusRef.current === "incoming") setStatus("idle");
+      }
+    };
+
+    const offInvite = subscribeCallInvites(handleInvite);
+    const offCancel = subscribeInviteCancels(handleCancel);
+    const offInbox = ensurePersonalInviteInbox(userId, handleInvite, handleCancel);
 
     void loadOpenCalls(true);
     return () => {
       offInvite();
+      offCancel();
+      offInbox();
       supabase.removeChannel(ch);
     };
   }, [loadOpenCalls, userId]);
@@ -523,7 +555,9 @@ export function useCall(userId: string | null) {
   const startDmCall = useCallback(
     async (peerId: string, video: boolean) => {
       if (!userId || !peerId || peerId === userId) return;
-      if (statusRef.current !== "idle") return;
+      if (statusRef.current !== "idle") {
+        throw new Error("You are already in a call. Hang up first.");
+      }
       const call = await createCall({
         createdBy: userId,
         kind: "dm",
@@ -540,7 +574,12 @@ export function useCall(userId: string | null) {
   const startGroupCall = useCallback(
     async (inviteeIds: string[], video: boolean) => {
       if (!userId) return;
-      if (statusRef.current !== "idle") return;
+      if (statusRef.current !== "idle") {
+        throw new Error("You are already in a call. Hang up first.");
+      }
+      if (!inviteeIds.length) {
+        throw new Error("Add at least one friend before starting a group call.");
+      }
       const call = await createCall({
         createdBy: userId,
         kind: "group",
@@ -561,7 +600,9 @@ export function useCall(userId: string | null) {
 
   const decline = useCallback(async () => {
     if (!userId || !incoming) return;
-    await setMemberState(incoming.callId, userId, "declined");
+    const id = incoming.callId;
+    await setMemberState(id, userId, "declined");
+    stopInviteRing(id);
     setIncoming(null);
     setIncomingVideo(false);
     setStatus("idle");

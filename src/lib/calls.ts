@@ -36,6 +36,8 @@ export type CallInvite = {
   peerId: string | null;
 };
 
+export type InviteCancel = { callId: string; callerId: string };
+
 // calls/call_members may be missing until migration runs — bypass typed client
 const raw = () => supabase as unknown as SupabaseClient;
 
@@ -53,29 +55,64 @@ function isMissingTable(error: { code?: string; message?: string } | null): bool
   return m.includes("Could not find the table") || m.includes("public.calls");
 }
 
-// Single shared invite channel — both send and receive on the SAME channel name
 const INVITE_CHANNEL = "zyraxon-call-invites-all";
+const RING_MS = 1200;
 
 type InviteHandler = (invite: CallInvite) => void;
+type CancelHandler = (cancel: InviteCancel) => void;
 const inviteHandlers = new Set<InviteHandler>();
+const cancelHandlers = new Set<CancelHandler>();
+const inboxChannels = new Map<string, RealtimeChannel>();
 let inviteCh: RealtimeChannel | null = null;
+let inviteReady: Promise<void> = Promise.resolve();
+let ringTimer: ReturnType<typeof setInterval> | null = null;
+let ringInvites: CallInvite[] = [];
 
-function onInviteBroadcast({ payload }: { payload: unknown }) {
-  const inv = payload as CallInvite | null;
-  if (!inv || !inv.callId || !inv.callerId) return;
-  inviteHandlers.forEach((h) => {
-    try {
-      h(inv);
-    } catch {}
+function waitChannel(ch: RealtimeChannel): Promise<void> {
+  if (ch.state === "SUBSCRIBED") return Promise.resolve();
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, 2500);
+    ch.subscribe((st) => {
+      if (st === "SUBSCRIBED" || st === "CHANNEL_ERROR" || st === "TIMED_OUT" || st === "CLOSED") {
+        clearTimeout(t);
+        resolve();
+      }
+    });
   });
 }
 
 function ensureInviteChannel(): RealtimeChannel {
   if (inviteCh) return inviteCh;
   const ch = supabase.channel(INVITE_CHANNEL);
-  ch.on("broadcast", { event: "invite" }, onInviteBroadcast);
-  ch.subscribe();
+  ch.on("broadcast", { event: "invite" }, ({ payload }) => {
+    const inv = payload as CallInvite | null;
+    if (!inv?.callId || !inv.callerId) return;
+    inviteHandlers.forEach((h) => {
+      try {
+        h(inv);
+      } catch {}
+    });
+  });
+  ch.on("broadcast", { event: "invite_cancel" }, ({ payload }) => {
+    const c = payload as InviteCancel | null;
+    if (!c?.callId) return;
+    cancelHandlers.forEach((h) => {
+      try {
+        h(c);
+      } catch {}
+    });
+  });
   inviteCh = ch;
+  inviteReady = waitChannel(ch);
+  return ch;
+}
+
+function ensureInbox(userId: string): RealtimeChannel {
+  const existing = inboxChannels.get(userId);
+  if (existing) return existing;
+  const ch = supabase.channel(`call-inbox-${userId}`);
+  ch.subscribe();
+  inboxChannels.set(userId, ch);
   return ch;
 }
 
@@ -87,29 +124,92 @@ export function subscribeCallInvites(handler: InviteHandler): () => void {
   };
 }
 
+export function subscribeInviteCancels(handler: CancelHandler): () => void {
+  cancelHandlers.add(handler);
+  ensureInviteChannel();
+  return () => {
+    cancelHandlers.delete(handler);
+  };
+}
+
+export function ensurePersonalInviteInbox(userId: string, onInvite: InviteHandler, onCancel: CancelHandler): () => void {
+  const ch = supabase.channel(`call-inbox-${userId}`);
+  ch.on("broadcast", { event: "invite" }, ({ payload }) => {
+    const inv = payload as CallInvite | null;
+    if (inv?.callId && inv.callerId) onInvite(inv);
+  });
+  ch.on("broadcast", { event: "invite_cancel" }, ({ payload }) => {
+    const c = payload as InviteCancel | null;
+    if (c?.callId) onCancel(c);
+  });
+  ch.subscribe();
+  inboxChannels.set(userId, ch);
+  return () => {
+    inviteHandlers.delete(onInvite);
+    cancelHandlers.delete(onCancel);
+    supabase.removeChannel(ch);
+    if (inboxChannels.get(userId) === ch) inboxChannels.delete(userId);
+  };
+}
+
 async function broadcastInvite(invite: CallInvite): Promise<void> {
   try {
     const ch = ensureInviteChannel();
-    if (ch.state !== "SUBSCRIBED") {
-      await new Promise<void>((resolve) => {
-        const t = setTimeout(resolve, 2000);
-        const check = (st: string) => {
-          if (st === "SUBSCRIBED") {
-            clearTimeout(t);
-            resolve();
-          }
-        };
-        // already may be subscribing
-        if (ch.state === "SUBSCRIBED") {
-          clearTimeout(t);
-          resolve();
-          return;
-        }
-        ch.subscribe(check);
-      });
-    }
+    await inviteReady;
     ch.send({ type: "broadcast", event: "invite", payload: invite });
+    if (invite.to) {
+      const inbox = ensureInbox(invite.to);
+      await waitChannel(inbox);
+      inbox.send({ type: "broadcast", event: "invite", payload: invite });
+    }
   } catch {}
+}
+
+export function broadcastInviteCancel(callId: string, callerId: string): void {
+  const payload: InviteCancel = { callId, callerId };
+  try {
+    const ch = ensureInviteChannel();
+    ch.send({ type: "broadcast", event: "invite_cancel", payload });
+  } catch {}
+}
+
+// Keep ringing until hangup so peers who open the app late still get the call
+export function startInviteRing(invites: CallInvite[]): void {
+  ringInvites = invites.filter((i) => i.callId && i.callerId);
+  const tick = () => {
+    for (const inv of ringInvites) void broadcastInvite(inv);
+  };
+  tick();
+  if (ringTimer) clearInterval(ringTimer);
+  ringTimer = setInterval(tick, RING_MS);
+}
+
+export function stopInviteRing(callId?: string): void {
+  if (!callId) {
+    ringInvites = [];
+    if (ringTimer) {
+      clearInterval(ringTimer);
+      ringTimer = null;
+    }
+    return;
+  }
+  ringInvites = ringInvites.filter((i) => i.callId !== callId);
+  if (!ringInvites.length && ringTimer) {
+    clearInterval(ringTimer);
+    ringTimer = null;
+  }
+}
+
+function buildInvites(call: CallRow, invitees: string[]): CallInvite[] {
+  return invitees.map((to) => ({
+    to,
+    callId: call.id,
+    callerId: call.created_by,
+    withVideo: call.with_video,
+    ringtone: call.ringtone,
+    kind: call.kind,
+    peerId: call.peer_id,
+  }));
 }
 
 export async function createCall(opts: {
@@ -122,6 +222,7 @@ export async function createCall(opts: {
 }): Promise<CallRow | null> {
   const client = raw();
   const ringtone = opts.ringtone ?? getSavedRingtone();
+  const invitees = opts.inviteeIds.filter((id) => id !== opts.createdBy);
   const { data: call, error } = await client
     .from("calls")
     .insert({
@@ -134,8 +235,6 @@ export async function createCall(opts: {
     })
     .select()
     .single();
-
-  const invitees = opts.inviteeIds.filter((id) => id !== opts.createdBy);
 
   if (error || !call) {
     if (isMissingTable(error)) {
@@ -150,27 +249,18 @@ export async function createCall(opts: {
         created_at: new Date().toISOString(),
         ended_at: null,
       };
-      for (const to of invitees) {
-        await broadcastInvite({
-          to,
-          callId: fallback.id,
-          callerId: fallback.created_by,
-          withVideo: fallback.with_video,
-          ringtone: fallback.ringtone,
-          kind: fallback.kind,
-          peerId: fallback.peer_id,
-        });
-      }
+      startInviteRing(buildInvites(fallback, invitees));
       return fallback;
     }
     return null;
   }
 
+  const row = call as CallRow;
   const now = new Date().toISOString();
   const members = [
-    { call_id: call.id, user_id: opts.createdBy, role: "host", state: "joined", joined_at: now, updated_at: now },
+    { call_id: row.id, user_id: opts.createdBy, role: "host", state: "joined", joined_at: now, updated_at: now },
     ...invitees.map((id) => ({
-      call_id: call.id,
+      call_id: row.id,
       user_id: id,
       role: "member",
       state: "invited",
@@ -179,20 +269,8 @@ export async function createCall(opts: {
     })),
   ];
   await client.from("call_members").upsert(members, { onConflict: "call_id,user_id" });
-
-  for (const to of invitees) {
-    await broadcastInvite({
-      to,
-      callId: call.id,
-      callerId: opts.createdBy,
-      withVideo: opts.withVideo,
-      ringtone,
-      kind: opts.kind,
-      peerId: opts.peerId ?? null,
-    });
-  }
-
-  return call as CallRow;
+  startInviteRing(buildInvites(row, invitees));
+  return row;
 }
 
 export async function fetchMyOpenCalls(userId: string): Promise<OpenCall[] | null> {
