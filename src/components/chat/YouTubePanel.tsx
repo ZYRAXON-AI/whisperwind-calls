@@ -39,15 +39,15 @@ interface YTVideo {
 export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
   const [activeCategory, setActiveCategory] = useState("All");
   const [searchInput, setSearchInput] = useState("");
-  const [currentQuery, setCurrentQuery] = useState("bangla songs trending");
+  const [currentQuery, setCurrentQuery] = useState("trending songs");
   const [videos, setVideos] = useState<YTVideo[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // বর্তমানে অ্যাক্টিভ প্লেয়ার ভিডিও
+  // Currently active player video
   const [activeVideoId, setActiveVideoId] = useState<string>("kJQP7kiw5Fk");
   const [activeTitle, setActiveTitle] = useState<string>("Mon Majhi Re - Arijit Singh");
 
-  // লাইভ ইউটিউব থেকে সার্চ ফেচ করা
+  // Fetch search results from YouTube
   useEffect(() => {
     let alive = true;
     setLoading(true);
@@ -60,7 +60,7 @@ export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
         if (!alive) return;
         if (data.videos && data.videos.length > 0) {
           setVideos(data.videos);
-          // প্রথমবার লোড হলে প্রথম ভিডিও সেট করা
+          // On first load, set the first video
           if (activeCategory !== "All" && data.videos[0]) {
             setActiveVideoId(data.videos[0].id);
             setActiveTitle(data.videos[0].title);
@@ -82,7 +82,7 @@ export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
     const query = searchInput.trim();
     if (!query) return;
 
-    // সরাসরি ইউটিউব ভিডিও আইডি বা লিংক পেস্ট করলে সাথে সাথে প্লে
+    // Paste a direct YouTube video ID or link to play instantly
     const match =
       query.match(/[?&]v=([\w-]{11})/) ||
       query.match(/youtu\.be\/([\w-]{11})/) ||
@@ -104,9 +104,9 @@ export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-[#0f0f0f] text-white">
-      {/* ১. টপ ইউটিউব হেডার (স্ক্রিনশটের মতো হুবহু) */}
+      {/* 1. Top YouTube header */}
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-white/10 px-3 sm:px-4 bg-[#0f0f0f]">
-        {/* বামে: মেনু ও অফিসিয়াল YouTube BD লোগো */}
+        {/* Left: menu + official YouTube logo */}
         <div className="flex items-center gap-3">
           {onOpenMenu && (
             <button
@@ -127,7 +127,7 @@ export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
           </div>
         </div>
 
-        {/* মাঝখানে: ইউটিউব সার্চ বার + ভয়েস সার্চ মাইক */}
+        {/* Center: YouTube search bar + voice search mic */}
         <form onSubmit={handleSearch} className="flex flex-1 max-w-xl mx-3 items-center">
           <div className="relative flex flex-1 items-center">
             <input
@@ -178,7 +178,7 @@ export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
           </button>
         </form>
 
-        {/* ডানে: Create, Bell, Open YouTube */}
+        {/* Right: Create, Bell, Open YouTube */}
         <div className="flex items-center gap-1 sm:gap-2">
           <a
             href={`https://www.youtube.com/watch?v=${activeVideoId}`}
@@ -200,7 +200,7 @@ export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
         </div>
       </header>
 
-      {/* ২. ক্যাটাগরি চিপস ফিল্টার (স্ক্রিনশটের মতো হরাইজন্টাল) */}
+      {/* 2. Category chip filters */}
       <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-white/10 px-3 py-2 bg-[#0f0f0f] scrollbar-none">
         {CATEGORIES.map((cat) => (
           <button
@@ -218,7 +218,7 @@ export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
         ))}
       </div>
 
-      {/* ৩. লাইভ ইউটিউব প্লেয়ার */}
+      {/* 3. Live YouTube player */}
       <div className="relative aspect-video w-full max-h-[46vh] bg-black shrink-0 border-b border-white/10">
         <iframe
           key={activeVideoId}
@@ -230,7 +230,7 @@ export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
         />
       </div>
 
-      {/* নাউ প্লেয়িং বার */}
+      {/* Now playing bar */}
       <div className="flex items-center justify-between border-b border-white/10 bg-[#181818] px-4 py-2 shrink-0">
         <div className="flex items-center gap-2 overflow-hidden">
           <Radio className="h-4 w-4 shrink-0 text-red-500 animate-pulse" />
@@ -238,7 +238,7 @@ export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
         </div>
       </div>
 
-      {/* ৪. রিয়েল ভিডিও ফিড গ্রিড (স্ক্রিনশটের মতো কার্ডস) */}
+      {/* 4. Real video feed grid */}
       <div className="flex-1 overflow-y-auto p-3 sm:p-4 scroll-soft bg-[#0f0f0f]">
         {loading ? (
           <div className="grid h-40 place-items-center">
@@ -262,7 +262,7 @@ export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
                     isSelected ? "ring-2 ring-red-500" : ""
                   }`}
                 >
-                  {/* থাম্বনেইল ও সময় */}
+                  {/* Thumbnail and duration */}
                   <div className="relative aspect-video w-full overflow-hidden rounded-xl bg-zinc-800">
                     <img
                       src={vid.thumbnail}
@@ -280,7 +280,7 @@ export function YouTubePanel({ onOpenMenu }: { onOpenMenu?: () => void }) {
                     </div>
                   </div>
 
-                  {/* ভিডিওর তথ্য */}
+                  {/* Video info */}
                   <div className="flex gap-2.5 pt-2 px-1">
                     <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-zinc-700 text-xs font-bold text-white uppercase">
                       {vid.channel.slice(0, 1) || "Y"}

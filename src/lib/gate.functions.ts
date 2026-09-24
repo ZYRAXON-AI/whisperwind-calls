@@ -23,7 +23,7 @@ export const unlockSite = createServerFn({ method: "POST" })
     const input = (data.password ?? "").trim().toLowerCase();
     const envPass = (process.env["SITE_PASSWORD"] ?? "").trim().toLowerCase();
 
-    // zyraxon, gyroxon, zyraxonai অথবা এনভায়রনমেন্ট ভ্যারিয়েবলের পাসওয়ার্ড গ্রহণ করবে
+    // Accepts zyraxon, gyroxon, zyraxonai or the SITE_PASSWORD environment variable
     const valid = ["zyraxon", "gyroxon", "zyraxonai"];
     if (envPass) valid.push(envPass);
 

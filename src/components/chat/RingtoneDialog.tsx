@@ -30,13 +30,13 @@ export function RingtoneDialog({
   const [selected, setSelected] = useState(() => getSavedRingtone());
   const [playingId, setPlayingId] = useState<string | null>(null);
 
-  // ইউটিউব লাইভ সার্চ স্টেট
-  const [ytQuery, setYtQuery] = useState("Bangla romantic ringtone");
+  // YouTube live search state
+  const [ytQuery, setYtQuery] = useState("romantic ringtone");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [activePreviewId, setActivePreviewId] = useState<string | null>(null);
 
-  // লাইভ গান সার্চ করা
+  // Fetch live songs
   function triggerSearch(query: string) {
     if (!query.trim()) return;
     setSearching(true);
@@ -51,7 +51,7 @@ export function RingtoneDialog({
 
   useEffect(() => {
     if (open && tab === "youtube" && searchResults.length === 0) {
-      triggerSearch("Bangla romantic song ringtone");
+      triggerSearch("romantic song ringtone");
     }
   }, [open, tab]);
 
@@ -82,7 +82,7 @@ export function RingtoneDialog({
           </DialogTitle>
         </DialogHeader>
 
-        {/* ট্যাব সুইচ */}
+        {/* Tab switch */}
         <div className="flex rounded-2xl bg-white/5 p-1 text-xs font-semibold shrink-0">
           <button
             type="button"
@@ -112,7 +112,7 @@ export function RingtoneDialog({
 
         {tab === "youtube" ? (
           <div className="mt-3 flex flex-1 flex-col gap-3 overflow-hidden">
-            {/* সার্চ ফর্ম */}
+            {/* Search form */}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -136,7 +136,7 @@ export function RingtoneDialog({
               </button>
             </form>
 
-            {/* প্রিভিউ অডিও প্লেয়ার ফ্রেম */}
+            {/* Preview audio player frame */}
             {activePreviewId && (
               <div className="rounded-2xl border border-white/20 bg-black p-2 shrink-0">
                 <div className="aspect-video w-full max-h-36 overflow-hidden rounded-xl">
@@ -150,7 +150,7 @@ export function RingtoneDialog({
               </div>
             )}
 
-            {/* শত শত রিয়েল গানের তালিকা */}
+            {/* Hundreds of real songs */}
             <div className="flex-1 overflow-y-auto pr-1 scroll-soft flex flex-col gap-2">
               {searching ? (
                 <div className="grid h-32 place-items-center">

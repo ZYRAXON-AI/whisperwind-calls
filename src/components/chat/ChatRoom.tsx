@@ -35,6 +35,7 @@ import {
 } from "@/lib/social";
 import {
   ensureNotificationPermission,
+  notify,
   playMessageSound,
   startRingtone,
   stopRingtone,
@@ -76,10 +77,10 @@ export function ChatRoom({
       const choice = await installPrompt.userChoice;
       if (choice.outcome === "accepted") {
         setInstallPrompt(null);
-        toast.success("অ্যাপ্লিকেশন সফলভাবে ইনস্টল করা হয়েছে!");
+        toast.success("App installed successfully!");
       }
     } else {
-      toast.info("মোবাইলে ইনস্টল করতে ব্রাউজারের থ্রি-ডট (⋮) মেনু থেকে 'Install app' বা 'Add to Home screen' চাপুন।");
+      toast.info("To install on mobile, open the browser menu (⋮) and tap 'Install app' or 'Add to Home screen'.");
     }
   };
 
@@ -104,6 +105,9 @@ export function ChatRoom({
     void loadProfiles();
     void loadFriendships();
     void ensureNotificationPermission();
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
   }, [loadProfiles, loadFriendships]);
 
   useEffect(() => {
@@ -141,7 +145,7 @@ export function ChatRoom({
         const f = payload.new as Friendship | undefined;
         if (f && f.addressee_id === user.id && f.status === "pending" && payload.eventType === "INSERT") {
           playMessageSound();
-          toast.info("নতুন ফ্রেন্ড রিকোয়েস্ট এসেছে!");
+          toast.info("New friend request received!");
         }
       })
       .subscribe();
@@ -150,15 +154,32 @@ export function ChatRoom({
     };
   }, [loadProfiles, loadFriendships, user.id]);
 
-  // ইনকামিং কলের রিংটোন বাজানো (কলার যে রিংটোন সেট করেছে সেটিই বাজবে)
+  // Incoming call ringtone (play the ringtone the caller selected) + background notify/vibrate
   useEffect(() => {
     if (call.status === "incoming") {
       startRingtone(call.callerRingtone);
+      const callerName =
+        (call.incoming ? profiles[call.incoming.callerId]?.display_name : undefined) ?? "Someone";
+      notify(
+        `Incoming ${call.incoming?.withVideo ? "video" : "audio"} call`,
+        `${callerName} is calling you`
+      );
+      try {
+        navigator.vibrate?.([400, 200, 400, 200, 600]);
+      } catch {}
     } else {
       stopRingtone();
+      try {
+        navigator.vibrate?.(0);
+      } catch {}
     }
-    return stopRingtone;
-  }, [call.status, call.callerRingtone]);
+    return () => {
+      stopRingtone();
+      try {
+        navigator.vibrate?.(0);
+      } catch {}
+    };
+  }, [call.status, call.callerRingtone, call.incoming, profiles]);
 
   const friendIds = useMemo(() => friendIdsOf(friendships, user.id), [friendships, user.id]);
   const friends = friendIds.map((id) => profiles[id]).filter(Boolean) as Profile[];
@@ -173,30 +194,30 @@ export function ChatRoom({
         (f.requester_id === id && f.addressee_id === user.id)
     );
     if (existing) {
-      toast.info("ইতিমধ্যেই ফ্রেন্ড রিকোয়েস্ট পাঠানো আছে বা যুক্ত আছেন।");
+      toast.info("A friend request already exists or you are already connected.");
       return;
     }
     const { error } = await supabase.from("friendships").insert({ requester_id: user.id, addressee_id: id });
     if (error) {
-      toast.error("রিকোয়েস্ট পাঠানো যায়নি: " + error.message);
+      toast.error("Could not send request: " + error.message);
     } else {
-      toast.success("ফ্রেন্ড রিকোয়েস্ট পাঠানো হয়েছে!");
+      toast.success("Friend request sent!");
       void loadFriendships();
     }
   }
 
   async function acceptRequest(rowId: string) {
     const { error } = await supabase.from("friendships").update({ status: "accepted" }).eq("id", rowId);
-    if (error) toast.error("গ্রহণে সমস্যা হয়েছে");
+    if (error) toast.error("Could not accept the request");
     else {
-      toast.success("ফ্রেন্ড রিকোয়েস্ট গ্রহণ করা হয়েছে!");
+      toast.success("Friend request accepted!");
       void loadFriendships();
     }
   }
 
   async function declineRequest(rowId: string) {
     const { error } = await supabase.from("friendships").delete().eq("id", rowId);
-    if (error) toast.error("বাতিল করা যায়নি");
+    if (error) toast.error("Could not decline the request");
     else void loadFriendships();
   }
 
@@ -214,21 +235,23 @@ export function ChatRoom({
   const peer = view.type === "dm" ? profiles[view.peerId] : null;
   const isPeerOnline = view.type === "dm" && view.peerId ? onlineUserIds.has(view.peerId) : onlineUserIds.size > 1;
 
-  // DM হলে ওই ব্যক্তিকে, নাহলে সব ফ্রেন্ডকে ইনভাইট করে গ্রুপ কল রুম
+  // In DM view call that person; otherwise invite all friends to a group call room
   const startCall = (video: boolean) => {
     unlockSound();
     const run =
       view.type === "dm"
         ? call.startDmCall(view.peerId, video)
         : call.startGroupCall(friendIds, video);
-    void run.catch(() => toast.error(video ? "Camera blocked" : "Microphone blocked"));
+    void run.catch((err: unknown) => {
+      toast.error(err instanceof Error && err.message ? err.message : video ? "Camera blocked" : "Microphone blocked");
+    });
   };
 
   const joinFirstCall = () => {
     const target = call.joinableCalls[0];
     if (!target) return;
     unlockSound();
-    void call.joinCall(target.id).catch(() => toast.error("কলে যোগ দেওয়া যায়নি"));
+    void call.joinCall(target.id).catch((err: unknown) => toast.error(err instanceof Error ? err.message : "Could not join the call"));
   };
 
   const headerTitle =
@@ -465,9 +488,9 @@ export function ChatRoom({
           </button>
         </header>
 
-        {/* Content views — সবসময় alive (keep-alive)।
-            Tab বদলালে কোনো view unmount হয় না, তাই loading নেয় না
-            আর YouTube/সাউন্ড বাজতে থাকে। শুধু hidden class toggle হয়। */}
+        {/* Content views — always alive (keep-alive).
+            Switching tabs never unmounts a view, so no loading flash,
+            and YouTube/sounds keep playing. Only the hidden class toggles. */}
         <div className="relative min-h-0 flex-1 overflow-hidden">
           <div
             className={view.type === "group" || view.type === "dm" ? "h-full" : "pointer-events-none hidden"}
@@ -545,7 +568,7 @@ export function ChatRoom({
             <YouTubePanel onOpenMenu={() => setNavOpen(true)} />
           </div>
 
-          {/* ProfilePage conditional — profile ডেটা ছাড়া mount করলে crash হতে পারে */}
+          {/* ProfilePage conditional — mounting without profile data can crash */}
           {view.type === "profile" && view.userId && profiles[view.userId] && (
             <ProfilePage
               profile={profiles[view.userId]}

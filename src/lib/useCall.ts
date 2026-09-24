@@ -36,6 +36,43 @@ type SigPayload = {
   candidate?: RTCIceCandidateInit;
 };
 
+// Translate getUserMedia failures into clear, actionable messages
+export function mediaErrorMessage(err: unknown, video: boolean): string {
+  const name = err instanceof DOMException ? err.name : "";
+  if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") {
+    return video
+      ? "Camera permission is blocked — allow camera for this site in your browser"
+      : "Microphone permission is blocked — allow microphone for this site in your browser";
+  }
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return video ? "No camera found on this device" : "No microphone found on this device";
+  }
+  if (name === "NotReadableError" || name === "TrackStartError") {
+    return "Camera/microphone is being used by another app";
+  }
+  if (name === "OverconstrainedError" || name === "ConstraintNotSatisfiedError") {
+    return video ? "Camera does not support the requested settings" : "Microphone does not support the requested settings";
+  }
+  if (name === "AbortError") return "Could not access camera/microphone — try again";
+  return video ? "Could not start the camera" : "Could not start the microphone";
+}
+
+async function acquireMedia(video: boolean): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: video ? { facingMode: "user" } : false,
+    });
+  } catch (err) {
+    // Retry with loose constraints — some devices reject exact/facingMode combos
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: true, video });
+    } catch {
+      throw err;
+    }
+  }
+}
+
 export function useCall(userId: string | null) {
   const [status, setStatus] = useState<CallStatus>("idle");
   const [withVideo, setWithVideo] = useState(false);
@@ -313,7 +350,7 @@ export function useCall(userId: string | null) {
 
       callChannelRef.current = ch;
 
-      // offers কেবল channel SUBSCRIBED এর পরে পাঠাও — নাহলে broadcast হারিয়ে যাবে
+      // Only send offers after the channel is SUBSCRIBED — otherwise broadcast is dropped
       return new Promise((resolve) => {
         const timer = setTimeout(resolve, 3000);
         ch.subscribe((st) => {
@@ -405,13 +442,10 @@ export function useCall(userId: string | null) {
 
         let stream: MediaStream;
         try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio: true,
-            video: video ? { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } } : false,
-          });
+          stream = await acquireMedia(video);
         } catch (err) {
           localCleanup();
-          throw err;
+          throw new Error(mediaErrorMessage(err, video));
         }
 
         localRef.current = stream;
@@ -435,7 +469,7 @@ export function useCall(userId: string | null) {
         await joinChannel(callId);
         await setCallActive(callId);
 
-        // নতুন জয়েনার নিয়ম: সব existing সদস্যকে offer পাঠাও
+        // New joiner rule: offer to every existing member
         const peers = await getJoinedPeers(callId, userId);
         peers.forEach((p) => createPeer(p));
         setJoinableCalls((prev) => prev.filter((c) => c.id !== callId));
@@ -457,7 +491,7 @@ export function useCall(userId: string | null) {
         inviteeIds: [peerId],
         withVideo: video,
       });
-      if (!call) throw new Error("failed to create call");
+      if (!call) throw new Error("Could not create the call room — server error. Please try again.");
       await enterCall(call.id, video);
     },
     [enterCall, userId]
@@ -474,7 +508,7 @@ export function useCall(userId: string | null) {
         inviteeIds,
         withVideo: video,
       });
-      if (!call) throw new Error("failed to create call");
+      if (!call) throw new Error("Could not create the call room — server error. Please try again.");
       await enterCall(call.id, video);
     },
     [enterCall, userId]
@@ -597,7 +631,7 @@ export function useCall(userId: string | null) {
     }
   }, [stopScreenShare]);
 
-  // unmount: best-effort leave so room doesn't stay ghost-joined
+  // unmount: best-effort leave so the room doesn't stay ghost-joined
   useEffect(() => {
     return () => {
       const callId = callIdRef.current;

@@ -73,7 +73,7 @@ function Home() {
     );
   }
 
-  // লগআউটের সময় gate সম্পূর্ণ লক করে দিয়ে /unlock এ পাঠিয়ে দেবে
+  // On sign out, fully lock the gate and redirect to /unlock
   async function handleSignOut() {
     await lock();
     await supabase.auth.signOut();

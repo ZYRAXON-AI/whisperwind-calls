@@ -40,14 +40,14 @@ export function Composer({
   const [plusOpen, setPlusOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
 
-  // লাইভ ভয়েস টাইপিং স্টেটস
+  // Live voice-typing state
   const [isSpeechListening, setIsSpeechListening] = useState(false);
-  const [speechLang, setSpeechLang] = useState<"bn-BD" | "en-US">("bn-BD");
+  const [speechLang, setSpeechLang] = useState<"bn-BD" | "en-US">("en-US");
   const speechRecognitionRef = useRef<any>(null);
   const shouldKeepListeningRef = useRef<boolean>(false);
   const baseTextRef = useRef<string>("");
 
-  // অডিও মেসেজ রেকর্ডিং স্টেটস
+  // Audio message recording state
   const [isRecording, setIsRecording] = useState(false);
   const [recordSec, setRecordSec] = useState(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -338,7 +338,7 @@ export function Composer({
                 }}
                 className="glass shrink-0 rounded-full px-2 py-1 text-[10px] font-bold text-primary"
               >
-                {speechLang === "bn-BD" ? "বাংলা" : "EN"}
+                {speechLang === "bn-BD" ? "BN" : "EN"}
               </button>
             )}
 
@@ -356,7 +356,7 @@ export function Composer({
                 }
               }}
               rows={1}
-              placeholder={isSpeechListening ? "Listening… বলুন, লেখা উঠছে…" : "Write something sweet…"}
+              placeholder={isSpeechListening ? "Listening… just speak, text appears…" : "Write something sweet…"}
               className={`scroll-soft max-h-32 min-h-11 flex-1 resize-none rounded-2xl border bg-input px-4 py-3 text-sm outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring/50 transition ${
                 isSpeechListening ? "border-red-500/50 ring-2 ring-red-500/20" : "border-border"
               }`}

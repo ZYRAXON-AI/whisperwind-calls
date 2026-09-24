@@ -32,7 +32,7 @@ export function Conversation({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
 
-  // রিয়েলটাইম টাইপিং ও সিন (Seen) স্ট্যাটাস
+  // Realtime typing and Seen status
   const [isPeerTyping, setIsPeerTyping] = useState(false);
   const [peerSeenMsgId, setPeerSeenMsgId] = useState<string | null>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -41,7 +41,7 @@ export function Conversation({
 
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Profile Map সেফ অবজেক্ট তৈরি (ক্র্যাশ বন্ধ করতে)
+  // Safe Profile map (prevents crashes)
   const profileMap: Record<string, Profile> = useMemo(() => {
     if (!profiles) return {};
     if (Array.isArray(profiles)) {
@@ -95,7 +95,7 @@ export function Conversation({
     } catch {}
   }, [messages, peerId]);
 
-  // রিয়েলটাইম চ্যানেল (Messages + Typing + Seen + Guest Broadcast)
+  // Realtime channel (Messages + Typing + Seen + Guest Broadcast)
   useEffect(() => {
     const channelName = `zyraxon-thread-${peerId ?? "group"}`;
     const channel = supabase.channel(channelName);
@@ -156,7 +156,7 @@ export function Conversation({
     };
   }, [belongsHere, me, peerId, profileMap]);
 
-  // শেষ মেসেজ দেখলে অপর প্রান্তে সাথে সাথে Seen ব্রডকাস্ট পাঠানো
+  // When the latest message is seen, broadcast Seen to the other side right away
   useEffect(() => {
     if (!messages.length || !peerId || !channelRef.current) return;
     const lastMsg = messages[messages.length - 1];
@@ -170,12 +170,12 @@ export function Conversation({
   }, [messages, peerId, me]);
 
   useEffect(() => {
-    // শুধু দৃশ্যমান (active) কনভার্সেশনে অটো-স্ক্রল — hidden সবগুলোতে লাগালে lag হয়
+    // Auto-scroll only the visible (active) conversation — scrolling hidden views causes lag
     if (!active) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, isPeerTyping, active]);
 
-  // টাইপিং থ্রটলিং
+  // Typing throttle
   const notifyTyping = useCallback(() => {
     const now = Date.now();
     if (now - lastTypingSentRef.current > 1500 && channelRef.current) {
@@ -188,7 +188,7 @@ export function Conversation({
     }
   }, [me]);
 
-  // মেসেজ সেন্ড
+  // Send message
   const send = useCallback(
     async (msg: OutgoingMessage) => {
       setSending(true);
@@ -214,7 +214,7 @@ export function Conversation({
           baseMsg.media_name = msg.file.name;
         }
 
-        // গেস্টদের মেসেজ ক্লাউড ডাটাবেজে যাবে না, শুধু রিয়েলটাইমে থাকবে
+        // Guest messages never hit the cloud DB — realtime broadcast only
         if (isGuest) {
           setMessages((prev) => [...prev, baseMsg as Message]);
           channelRef.current?.send({
@@ -232,6 +232,7 @@ export function Conversation({
             media_name: baseMsg.media_name,
           });
         }
+        playMessageSound();
       } catch {
         toast.error("Could not send message");
       } finally {
@@ -326,7 +327,7 @@ export function Conversation({
                   )}
 
                   <div className="mt-1 flex items-center justify-end gap-2">
-                    {/* শুধুমাত্র নিজের পাঠানো মেসেজে এডিট ও ডিলিট বাটন */}
+                    {/* Edit & delete buttons only on own messages */}
                     {m.mine && editingId !== m.id && (
                       <>
                         {m.kind === "text" && (
@@ -361,7 +362,7 @@ export function Conversation({
                 </div>
               </div>
 
-              {/* ফেসবুক মেসেঞ্জার-স্টাইল Seen স্ট্যাটাস */}
+              {/* Facebook-Messenger-style Seen status */}
               {isSeenTarget && peerProfile && (
                 <div className="mr-10 mt-1 flex items-center justify-end gap-1.5">
                   <span className="text-[10px] text-muted-foreground">Seen</span>
@@ -374,7 +375,7 @@ export function Conversation({
           );
         })}
 
-        {/* ৩-ডট টাইপিং এনিমেশন */}
+        {/* 3-dot typing animation */}
         {isPeerTyping && (
           <div className="flex items-center gap-2 pl-1">
             {peerProfile && <Avatar profile={peerProfile} className="h-7 w-7 ring-2 ring-primary/30" />}

@@ -28,7 +28,7 @@ export function FriendsPanel({
 }) {
   const [q, setQ] = useState("");
 
-  // Object বা Array যেকোনো ফরম্যাট থেকে নিরাপদ Profile Array তৈরি
+  // Safely build a Profile array from either object map or array format
   const profileList: Profile[] = useMemo(() => {
     if (Array.isArray(profiles)) return profiles;
     if (profiles && typeof profiles === "object") return Object.values(profiles);

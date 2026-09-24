@@ -1,8 +1,8 @@
-// Notification & Ringtone sounds that work in background tabs and mobile devices.
+// Notification & ringtone sounds that work in background tabs and mobile devices.
 let ctx: AudioContext | null = null;
 let ringTimer: ReturnType<typeof setInterval> | null = null;
 let previewTimer: ReturnType<typeof setTimeout> | null = null;
-// ইউটিউব রিংটোন (yt:VIDEOID) বাজানোর জন্য hidden audio iframe
+// YouTube ringtone (yt:VIDEOID) plays via a hidden looping audio iframe
 const ytFrames = new Set<HTMLIFrameElement>();
 
 function audio(): AudioContext | null {
@@ -51,12 +51,14 @@ function tone(
   osc.stop(t + duration + 0.05);
 }
 
+// Soft ascending chime — plays when a message is sent or received
 export function playMessageSound() {
-  tone(880, 0, 0.16);
-  tone(1320, 0.12, 0.22);
+  tone(784, 0, 0.12, 0.16, "sine"); // G5
+  tone(988, 0.07, 0.14, 0.15, "sine"); // B5
+  tone(1318.5, 0.15, 0.24, 0.17, "triangle"); // E6
 }
 
-// ---------------- কাস্টম রিংটোন প্রিসেটসমূহ ----------------
+// ---------------- Ringtone presets ----------------
 export type RingtonePreset = {
   id: string;
   name: string;
@@ -68,7 +70,7 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
   {
     id: "classic",
     name: "Zyraxon Classic",
-    description: "স্ট্যান্ডার্ড উচ্চ কম্পাঙ্কের ক্লাসিক চিম",
+    description: "Standard high-frequency classic chime",
     play: () => {
       tone(660, 0, 0.35, 0.3);
       tone(880, 0.4, 0.45, 0.3);
@@ -77,7 +79,7 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
   {
     id: "romantic",
     name: "Romantic Melody",
-    description: "মিষ্টি হার্প ও সফট সুরের শান্ত রিং",
+    description: "Sweet harp and soft romantic ring",
     play: () => {
       tone(523.25, 0.0, 0.2, 0.25, "triangle"); // C5
       tone(659.25, 0.18, 0.2, 0.25, "triangle"); // E5
@@ -88,7 +90,7 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
   {
     id: "cyber",
     name: "Cyber Pulse",
-    description: "ফিউচারিস্টিক হাই-টেক সিন্থ সাইবার রিং",
+    description: "Futuristic high-tech synth cyber ring",
     play: () => {
       tone(440, 0, 0.12, 0.22, "sawtooth");
       tone(880, 0.12, 0.12, 0.22, "sawtooth");
@@ -99,7 +101,7 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
   {
     id: "lofi",
     name: "Lo-Fi Dream",
-    description: "আরামদায়ক সফট ড্রিম কাইমস",
+    description: "Relaxing soft dream chimes",
     play: () => {
       tone(392, 0.0, 0.3, 0.25, "sine"); // G4
       tone(587.33, 0.25, 0.35, 0.25, "sine"); // D5
@@ -109,7 +111,7 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
   {
     id: "marimba",
     name: "Bright Marimba",
-    description: "আইফোন-স্টাইল প্রাণবন্ত মারিম্বা মেলোডি",
+    description: "iPhone-style lively marimba melody",
     play: () => {
       tone(659.25, 0, 0.15, 0.3, "sine");
       tone(587.33, 0.15, 0.15, 0.3, "sine");
@@ -120,7 +122,7 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
   {
     id: "ambient",
     name: "Zen Bells",
-    description: "মন শান্ত করা ক্রিস্টাল বেল",
+    description: "Calming crystal bells",
     play: () => {
       tone(1046.5, 0.0, 0.4, 0.2, "sine");
       tone(1318.51, 0.3, 0.4, 0.2, "sine");
@@ -141,7 +143,7 @@ export function setSavedRingtone(id: string) {
   localStorage.setItem(STORAGE_KEY, id);
 }
 
-// ইউটিউব রিংটোন (yt:VIDEOID) বাজানো — autoplay + loop করা hidden iframe
+// Play a YouTube ringtone (yt:VIDEOID) — autoplay + loop hidden iframe
 function playYoutubeRingtone(videoId: string) {
   if (typeof document === "undefined") return;
   stopYoutubeRingtone();
@@ -163,12 +165,12 @@ function stopYoutubeRingtone() {
   ytFrames.clear();
 }
 
-// যে রিংটোন কলকারী পাঠাবে সেটি বাজাবে (preset বা yt:VIDEOID)
+// Play the caller-selected ringtone (preset id or yt:VIDEOID)
 export function startRingtone(presetId?: string) {
   if (ringTimer) return;
   const id = presetId || getSavedRingtone();
 
-  // ইউটিউব রিংটোন
+  // YouTube ringtone
   if (id.startsWith("yt:")) {
     playYoutubeRingtone(id.slice(3));
     return;
@@ -213,11 +215,33 @@ export async function ensureNotificationPermission() {
   return (await Notification.requestPermission()) === "granted";
 }
 
+// System notification — works from background tabs and Android home-screen PWA
+// (Android blocks new Notification(); ServiceWorkerRegistration.showNotification is required there)
 export function notify(title: string, body: string) {
   if (typeof document === "undefined") return;
   if (document.visibilityState === "visible") return;
   if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const opts: NotificationOptions = {
+    body,
+    icon: "/favicon.ico",
+    badge: "/favicon.ico",
+    tag: "zyraxon",
+    renotify: true,
+  };
   try {
-    new Notification(title, { body, icon: "/favicon.ico", tag: "zyraxon" });
+    if ("serviceWorker" in navigator && navigator.serviceWorker) {
+      navigator.serviceWorker.ready
+        .then((reg) => reg.showNotification(title, opts))
+        .catch(() => {
+          try {
+            new Notification(title, opts);
+          } catch {}
+        });
+    } else {
+      new Notification(title, opts);
+    }
+  } catch {}
+  try {
+    navigator.vibrate?.([180, 90, 180]);
   } catch {}
 }
