@@ -14,6 +14,12 @@ function localKey(peerId: string | null) {
   return `zyraxon-messages-${peerId ?? "group"}`;
 }
 
+// Same channel for both sides of a DM (sorted ids) so broadcast always crosses
+function threadChannelName(me: string, peerId: string | null) {
+  if (!peerId) return "zyraxon-thread-group";
+  return `zyraxon-thread-${[me, peerId].sort().join("-")}`;
+}
+
 export function Conversation({
   me,
   peerId,
@@ -32,16 +38,16 @@ export function Conversation({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
 
-  // Realtime typing and Seen status
   const [isPeerTyping, setIsPeerTyping] = useState(false);
   const [peerSeenMsgId, setPeerSeenMsgId] = useState<string | null>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTypingSentRef = useRef<number>(0);
   const channelRef = useRef<any>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Safe Profile map (prevents crashes)
   const profileMap: Record<string, Profile> = useMemo(() => {
     if (!profiles) return {};
     if (Array.isArray(profiles)) {
@@ -49,6 +55,11 @@ export function Conversation({
     }
     return profiles;
   }, [profiles]);
+
+  const profileMapRef = useRef(profileMap);
+  profileMapRef.current = profileMap;
+  const meRef = useRef(me);
+  meRef.current = me;
 
   const belongsHere = useCallback(
     (m: Message) =>
@@ -58,6 +69,9 @@ export function Conversation({
         : m.recipient_id === null,
     [me, peerId]
   );
+
+  const belongsHereRef = useRef(belongsHere);
+  belongsHereRef.current = belongsHere;
 
   useEffect(() => {
     try {
@@ -95,10 +109,30 @@ export function Conversation({
     } catch {}
   }, [messages, peerId]);
 
-  // Realtime channel (Messages + Typing + Seen + Guest Broadcast)
+  const handleIncoming = useCallback((msg: Message) => {
+    if (!belongsHereRef.current(msg)) return;
+    setMessages((prev) => {
+      if (prev.some((m) => m.id === msg.id)) {
+        return prev.map((m) => (m.id === msg.id ? msg : m));
+      }
+      if (msg.sender_id !== meRef.current) {
+        playMessageSound();
+        const name = profileMapRef.current[msg.sender_id]?.display_name ?? "New message";
+        notify(name, msg.body ?? "Sent you something", {
+          force: true,
+          tag: `msg-${msg.sender_id}`,
+        });
+        if (!activeRef.current) {
+          toast.info(`${name}: ${msg.body ?? "Sent you something"}`);
+        }
+      }
+      return [...prev, msg];
+    });
+  }, []);
+
+  // Realtime channel (Messages + Typing + Seen + Guest + mirror broadcast)
   useEffect(() => {
-    const channelName = `zyraxon-thread-${peerId ?? "group"}`;
-    const channel = supabase.channel(channelName);
+    const channel = supabase.channel(threadChannelName(me, peerId));
 
     channel
       .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, (payload) => {
@@ -107,30 +141,14 @@ export function Conversation({
           setMessages((prev) => prev.filter((m) => m.id !== old.id));
           return;
         }
-        const msg = payload.new as Message;
-        if (!belongsHere(msg)) return;
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === msg.id)) {
-            return prev.map((m) => (m.id === msg.id ? msg : m));
-          }
-          if (msg.sender_id !== me) {
-            playMessageSound();
-            notify(profileMap[msg.sender_id]?.display_name ?? "New message", msg.body ?? "Sent you something");
-          }
-          return [...prev, msg];
-        });
+        handleIncoming(payload.new as Message);
       })
       .on("broadcast", { event: "guest_message" }, ({ payload }) => {
-        const msg = payload as Message;
-        if (!belongsHere(msg)) return;
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === msg.id)) return prev;
-          if (msg.sender_id !== me) {
-            playMessageSound();
-            notify(profileMap[msg.sender_id]?.display_name ?? "Guest User", msg.body ?? "New message");
-          }
-          return [...prev, msg];
-        });
+        handleIncoming(payload as Message);
+      })
+      // Instant mirror from the sender — works even if postgres_changes is down
+      .on("broadcast", { event: "message" }, ({ payload }) => {
+        handleIncoming(payload as Message);
       })
       .on("broadcast", { event: "typing" }, ({ payload }) => {
         if (payload.userId !== me) {
@@ -154,9 +172,8 @@ export function Conversation({
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
       supabase.removeChannel(channel);
     };
-  }, [belongsHere, me, peerId, profileMap]);
+  }, [handleIncoming, me, peerId]);
 
-  // When the latest message is seen, broadcast Seen to the other side right away
   useEffect(() => {
     if (!messages.length || !peerId || !channelRef.current) return;
     const lastMsg = messages[messages.length - 1];
@@ -170,12 +187,10 @@ export function Conversation({
   }, [messages, peerId, me]);
 
   useEffect(() => {
-    // Auto-scroll only the visible (active) conversation — scrolling hidden views causes lag
     if (!active) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, isPeerTyping, active]);
 
-  // Typing throttle
   const notifyTyping = useCallback(() => {
     const now = Date.now();
     if (now - lastTypingSentRef.current > 1500 && channelRef.current) {
@@ -188,14 +203,13 @@ export function Conversation({
     }
   }, [me]);
 
-  // Send message
   const send = useCallback(
     async (msg: OutgoingMessage) => {
       setSending(true);
       try {
         const isGuest = profileMap[me]?.is_guest || me.includes("guest");
         const baseMsg: Partial<Message> = {
-          id: `msg-${Date.now()}`,
+          id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           sender_id: me,
           recipient_id: peerId,
           created_at: new Date().toISOString(),
@@ -214,27 +228,45 @@ export function Conversation({
           baseMsg.media_name = msg.file.name;
         }
 
-        // Guest messages never hit the cloud DB — realtime broadcast only
+        let saved: Message = baseMsg as Message;
+
         if (isGuest) {
-          setMessages((prev) => [...prev, baseMsg as Message]);
+          setMessages((prev) => [...prev, saved]);
           channelRef.current?.send({
             type: "broadcast",
             event: "guest_message",
-            payload: baseMsg,
+            payload: saved,
           });
         } else {
-          await supabase.from("messages").insert({
-            sender_id: me,
-            recipient_id: peerId,
-            kind: baseMsg.kind,
-            body: baseMsg.body,
-            media_url: baseMsg.media_url,
-            media_name: baseMsg.media_name,
+          const { data, error } = await supabase
+            .from("messages")
+            .insert({
+              sender_id: me,
+              recipient_id: peerId,
+              kind: baseMsg.kind,
+              body: baseMsg.body,
+              media_url: baseMsg.media_url,
+              media_name: baseMsg.media_name,
+            })
+            .select()
+            .single();
+          if (error) throw new Error(error.message);
+          if (data) saved = data as Message;
+          setMessages((prev) => (prev.some((m) => m.id === saved.id) ? prev : [...prev, saved]));
+          // Instant mirror so peer sees it even if postgres_changes fails
+          channelRef.current?.send({
+            type: "broadcast",
+            event: "message",
+            payload: saved,
           });
         }
         playMessageSound();
-      } catch {
-        toast.error("Could not send message");
+      } catch (err) {
+        toast.error(
+          err instanceof Error && err.message
+            ? `Could not send: ${err.message}`
+            : "Could not send message"
+        );
       } finally {
         setSending(false);
       }
@@ -244,7 +276,8 @@ export function Conversation({
 
   async function removeMessage(id: string) {
     setMessages((prev) => prev.filter((m) => m.id !== id));
-    await supabase.from("messages").delete().eq("id", id);
+    const { error } = await supabase.from("messages").delete().eq("id", id);
+    if (error) toast.error("Could not delete message");
   }
 
   async function saveEdit(id: string) {
@@ -254,7 +287,11 @@ export function Conversation({
     setMessages((prev) =>
       prev.map((m) => (m.id === id ? { ...m, body, edited_at: new Date().toISOString() } : m))
     );
-    await supabase.from("messages").update({ body, edited_at: new Date().toISOString() }).eq("id", id);
+    const { error } = await supabase
+      .from("messages")
+      .update({ body, edited_at: new Date().toISOString() })
+      .eq("id", id);
+    if (error) toast.error("Could not save edit");
   }
 
   const rows = useMemo(
@@ -327,7 +364,6 @@ export function Conversation({
                   )}
 
                   <div className="mt-1 flex items-center justify-end gap-2">
-                    {/* Edit & delete buttons only on own messages */}
                     {m.mine && editingId !== m.id && (
                       <>
                         {m.kind === "text" && (
@@ -362,7 +398,6 @@ export function Conversation({
                 </div>
               </div>
 
-              {/* Facebook-Messenger-style Seen status */}
               {isSeenTarget && peerProfile && (
                 <div className="mr-10 mt-1 flex items-center justify-end gap-1.5">
                   <span className="text-[10px] text-muted-foreground">Seen</span>
@@ -375,7 +410,6 @@ export function Conversation({
           );
         })}
 
-        {/* 3-dot typing animation */}
         {isPeerTyping && (
           <div className="flex items-center gap-2 pl-1">
             {peerProfile && <Avatar profile={peerProfile} className="h-7 w-7 ring-2 ring-primary/30" />}

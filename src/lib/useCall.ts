@@ -10,6 +10,7 @@ import {
   getJoinedPeers,
   setCallActive,
   setMemberState,
+  subscribeCallInvites,
 } from "@/lib/calls";
 
 const ICE: RTCConfiguration = {
@@ -348,6 +349,21 @@ export function useCall(userId: string | null) {
         if (p.callId === callIdRef.current && p.from !== userIdRef.current) localCleanup();
       });
 
+      // Presence: discover peers even when call_members table is missing
+      ch.on("presence", { event: "sync" }, () => {
+        const state = ch.presenceState();
+        const seen = new Set<string>();
+        for (const key of Object.keys(state)) {
+          const entries = state[key] as { userId?: string }[];
+          for (const e of entries) {
+            if (e?.userId && e.userId !== userIdRef.current) seen.add(e.userId);
+          }
+        }
+        seen.forEach((id) => {
+          if (localRef.current && !pcsRef.current.has(id)) createPeer(id);
+        });
+      });
+
       callChannelRef.current = ch;
 
       // Only send offers after the channel is SUBSCRIBED — otherwise broadcast is dropped
@@ -356,12 +372,15 @@ export function useCall(userId: string | null) {
         ch.subscribe((st) => {
           if (st === "SUBSCRIBED") {
             clearTimeout(timer);
+            try {
+              void ch.track({ userId: userIdRef.current });
+            } catch {}
             resolve();
           }
         });
       });
     },
-    [closePeer, handleSig, localCleanup]
+    [closePeer, createPeer, handleSig, localCleanup]
   );
 
   const loadOpenCalls = useCallback(
@@ -406,7 +425,7 @@ export function useCall(userId: string | null) {
     [localCleanup, userId]
   );
 
-  // realtime invites + call status + initial load
+  // realtime invites (broadcast bus) + call status + initial load
   useEffect(() => {
     if (!userId) return;
     const refresh = () => {
@@ -420,8 +439,27 @@ export function useCall(userId: string | null) {
     )
       .on("postgres_changes", { event: "*", schema: "public", table: "calls" }, refresh)
       .subscribe();
+
+    // Realtime invite bus — rings even when calls/call_members tables are missing
+    const offInvite = subscribeCallInvites((inv) => {
+      if (inv.to && inv.to !== userId) return;
+      if (inv.callerId === userId) return;
+      if (inv.callId === callIdRef.current) return;
+      if (statusRef.current !== "idle" && statusRef.current !== "incoming") return;
+      setIncoming({
+        callId: inv.callId,
+        callerId: inv.callerId,
+        withVideo: inv.withVideo,
+        ringtone: inv.ringtone,
+      });
+      setIncomingVideo(inv.withVideo);
+      setCallerRingtone(inv.ringtone);
+      setStatus("incoming");
+    });
+
     void loadOpenCalls(true);
     return () => {
+      offInvite();
       supabase.removeChannel(ch);
     };
   }, [loadOpenCalls, userId]);
@@ -469,9 +507,11 @@ export function useCall(userId: string | null) {
         await joinChannel(callId);
         await setCallActive(callId);
 
-        // New joiner rule: offer to every existing member
-        const peers = await getJoinedPeers(callId, userId);
-        peers.forEach((p) => createPeer(p));
+        // New joiner rule: offer to every existing member (DB) + presence covers fallback
+        try {
+          const peers = await getJoinedPeers(callId, userId);
+          peers.forEach((p) => createPeer(p));
+        } catch {}
         setJoinableCalls((prev) => prev.filter((c) => c.id !== callId));
       } finally {
         enteringRef.current = false;

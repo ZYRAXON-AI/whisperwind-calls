@@ -18,6 +18,16 @@ function audio(): AudioContext | null {
   return ctx;
 }
 
+// Keep audio alive when tab becomes visible again (background suspends AudioContext)
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      const c = audio();
+      if (c && c.state === "suspended") void c.resume();
+    }
+  });
+}
+
 export function unlockSound() {
   const c = audio();
   if (!c) return;
@@ -56,6 +66,13 @@ export function playMessageSound() {
   tone(784, 0, 0.12, 0.16, "sine"); // G5
   tone(988, 0.07, 0.14, 0.15, "sine"); // B5
   tone(1318.5, 0.15, 0.24, 0.17, "triangle"); // E6
+}
+
+// Louder ring for incoming calls (survives brief AudioContext pauses)
+export function playCallAlert() {
+  tone(880, 0, 0.2, 0.35, "triangle");
+  tone(1108, 0.18, 0.2, 0.35, "triangle");
+  tone(1318, 0.36, 0.3, 0.4, "sine");
 }
 
 // ---------------- Ringtone presets ----------------
@@ -148,7 +165,8 @@ function playYoutubeRingtone(videoId: string) {
   if (typeof document === "undefined") return;
   stopYoutubeRingtone();
   const iframe = document.createElement("iframe");
-  iframe.style.cssText = "position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;left:0;bottom:0;border:none;";
+  iframe.style.cssText =
+    "position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;left:0;bottom:0;border:none;";
   iframe.src = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&loop=1&playlist=${videoId}&controls=0&disablekb=1&playsinline=1`;
   iframe.allow = "autoplay";
   iframe.title = "ringtone";
@@ -212,36 +230,53 @@ export async function ensureNotificationPermission() {
   if (typeof window === "undefined" || !("Notification" in window)) return false;
   if (Notification.permission === "granted") return true;
   if (Notification.permission === "denied") return false;
-  return (await Notification.requestPermission()) === "granted";
+  try {
+    return (await Notification.requestPermission()) === "granted";
+  } catch {
+    return false;
+  }
 }
 
-// System notification — works from background tabs and Android home-screen PWA
-// (Android blocks new Notification(); ServiceWorkerRegistration.showNotification is required there)
-export function notify(title: string, body: string) {
+// System notification via ServiceWorker (required on Android PWA).
+// force=true → also show while page is visible (calls, important alerts).
+export function notify(
+  title: string,
+  body: string,
+  opts?: { force?: boolean; tag?: string; vibrate?: number[] | number }
+) {
   if (typeof document === "undefined") return;
-  if (document.visibilityState === "visible") return;
-  if (!("Notification" in window) || Notification.permission !== "granted") return;
-  const opts: NotificationOptions = {
+  if (!opts?.force && document.visibilityState === "visible") return;
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+
+  const tag = opts?.tag ?? "zyraxon";
+  const notificationOpts: NotificationOptions = {
     body,
     icon: "/favicon.ico",
     badge: "/favicon.ico",
-    tag: "zyraxon",
+    tag,
     renotify: true,
   };
+
+  const show = () => {
+    try {
+      if ("serviceWorker" in navigator && navigator.serviceWorker) {
+        navigator.serviceWorker.ready
+          .then((reg) => reg.showNotification(title, notificationOpts))
+          .catch(() => {
+            try {
+              new Notification(title, notificationOpts);
+            } catch {}
+          });
+      } else {
+        new Notification(title, notificationOpts);
+      }
+    } catch {}
+  };
+
+  show();
+
   try {
-    if ("serviceWorker" in navigator && navigator.serviceWorker) {
-      navigator.serviceWorker.ready
-        .then((reg) => reg.showNotification(title, opts))
-        .catch(() => {
-          try {
-            new Notification(title, opts);
-          } catch {}
-        });
-    } else {
-      new Notification(title, opts);
-    }
-  } catch {}
-  try {
-    navigator.vibrate?.([180, 90, 180]);
+    const vib = opts?.vibrate ?? [180, 90, 180];
+    navigator.vibrate?.(vib);
   } catch {}
 }

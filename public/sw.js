@@ -35,6 +35,23 @@ self.addEventListener("push", (event) => {
       badge: "/favicon.ico",
       tag: data.tag || "whisperwind",
       renotify: true,
+      requireInteraction: data.requireInteraction === true,
+    })
+  );
+});
+
+// Page can ask SW to show a notification even when window is backgrounded
+self.addEventListener("message", (event) => {
+  const data = event.data;
+  if (!data || data.type !== "notify") return;
+  event.waitUntil(
+    self.registration.showNotification(data.title || "Whisperwind", {
+      body: data.body || "",
+      icon: "/favicon.ico",
+      badge: "/favicon.ico",
+      tag: data.tag || "zyraxon",
+      renotify: true,
+      requireInteraction: data.requireInteraction === true,
     })
   );
 });

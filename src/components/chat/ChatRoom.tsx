@@ -36,6 +36,7 @@ import {
 import {
   ensureNotificationPermission,
   notify,
+  playCallAlert,
   playMessageSound,
   startRingtone,
   stopRingtone,
@@ -146,6 +147,10 @@ export function ChatRoom({
         if (f && f.addressee_id === user.id && f.status === "pending" && payload.eventType === "INSERT") {
           playMessageSound();
           toast.info("New friend request received!");
+          notify("Friend request", "Someone wants to connect with you", {
+            force: true,
+            tag: "friend-req",
+          });
         }
       })
       .subscribe();
@@ -154,7 +159,7 @@ export function ChatRoom({
     };
   }, [loadProfiles, loadFriendships, user.id]);
 
-  // Incoming call ringtone (play the ringtone the caller selected) + background notify/vibrate
+  // Incoming call ringtone (caller-selected) + loud background notify + vibrate
   useEffect(() => {
     if (call.status === "incoming") {
       startRingtone(call.callerRingtone);
@@ -162,10 +167,16 @@ export function ChatRoom({
         (call.incoming ? profiles[call.incoming.callerId]?.display_name : undefined) ?? "Someone";
       notify(
         `Incoming ${call.incoming?.withVideo ? "video" : "audio"} call`,
-        `${callerName} is calling you`
+        `${callerName} is calling you — tap to answer`,
+        {
+          force: true,
+          tag: `call-${call.incoming?.callId ?? "in"}`,
+          vibrate: [500, 200, 500, 200, 700],
+        }
       );
+      playCallAlert();
       try {
-        navigator.vibrate?.([400, 200, 400, 200, 600]);
+        navigator.vibrate?.([500, 200, 500, 200, 700]);
       } catch {}
     } else {
       stopRingtone();
