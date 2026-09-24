@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Bell, Check, Music, Play, Square, Search, Youtube, Sparkles } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Bell, Check, Music, Play, Square, Search, Youtube, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -11,12 +11,13 @@ import {
   stopRingtone,
 } from "@/lib/sounds";
 
-const QUICK_SONGS = [
-  { label: "Lofi Beats", id: "jfKfP4vpt88", title: "Lofi Girl Live Chills" },
-  { label: "Romantic Melody", id: "4xDzrJKXOOY", title: "Peaceful Piano Romance" },
-  { label: "Bangla Vibe", id: "kJQP7kiw5Fk", title: "Acoustic Guitar Soul" },
-  { label: "English Chill", id: "5qap5aO4i9A", title: "Lofi Hip Hop Vibes" },
-];
+interface SearchResult {
+  id: string;
+  title: string;
+  channel: string;
+  duration: string;
+  thumbnail: string;
+}
 
 export function RingtoneDialog({
   open,
@@ -25,53 +26,41 @@ export function RingtoneDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
 }) {
-  const [tab, setTab] = useState<"presets" | "youtube">("presets");
+  const [tab, setTab] = useState<"presets" | "youtube">("youtube");
   const [selected, setSelected] = useState(() => getSavedRingtone());
   const [playingId, setPlayingId] = useState<string | null>(null);
 
-  // YouTube search & custom tune states
-  const [ytQuery, setYtQuery] = useState("");
-  const [previewYtId, setPreviewYtId] = useState<string | null>(null);
+  // ইউটিউব লাইভ সার্চ স্টেট
+  const [ytQuery, setYtQuery] = useState("Bangla romantic ringtone");
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [activePreviewId, setActivePreviewId] = useState<string | null>(null);
 
-  function handleSelect(id: string, name?: string) {
+  // লাইভ গান সার্চ করা
+  function triggerSearch(query: string) {
+    if (!query.trim()) return;
+    setSearching(true);
+    fetch(`/api/public/youtube?q=${encodeURIComponent(query + " ringtone song")}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.videos) setSearchResults(data.videos.slice(0, 20));
+      })
+      .catch(() => {})
+      .finally(() => setSearching(false));
+  }
+
+  useEffect(() => {
+    if (open && tab === "youtube" && searchResults.length === 0) {
+      triggerSearch("Bangla romantic song ringtone");
+    }
+  }, [open, tab]);
+
+  function handleSelectRingtone(id: string, name: string) {
     setSelected(id);
     setSavedRingtone(id);
     stopRingtone();
-    setPreviewYtId(null);
-    setPlayingId(null);
-    toast.success(`রিংটোন হিসেবে "${name || id}" সফলভাবে সেট করা হয়েছে!`);
-  }
-
-  function handlePlayPreset(id: string) {
-    setPreviewYtId(null);
-    if (playingId === id) {
-      stopRingtone();
-      setPlayingId(null);
-    } else {
-      setPlayingId(id);
-      previewRingtone(id);
-      setTimeout(() => {
-        setPlayingId((curr) => (curr === id ? null : curr));
-      }, 2000);
-    }
-  }
-
-  function handleSearchYouTube(e: React.FormEvent) {
-    e.preventDefault();
-    if (!ytQuery.trim()) return;
-
-    // Check if directly a YouTube URL or 11-char ID
-    const match =
-      ytQuery.match(/[?&]v=([\w-]{11})/) ||
-      ytQuery.match(/youtu\.be\/([\w-]{11})/) ||
-      ytQuery.match(/^([\w-]{11})$/);
-
-    if (match) {
-      setPreviewYtId(match[1]);
-    } else {
-      // Use query string
-      setPreviewYtId(encodeURIComponent(ytQuery.trim()));
-    }
+    setActivePreviewId(null);
+    toast.success(`"${name}" successfully set as caller ringtone!`);
   }
 
   return (
@@ -81,32 +70,20 @@ export function RingtoneDialog({
         if (!v) {
           stopRingtone();
           setPlayingId(null);
-          setPreviewYtId(null);
+          setActivePreviewId(null);
         }
         onOpenChange(v);
       }}
     >
-      <DialogContent className="glass-strong rounded-3xl border-border sm:max-w-lg">
+      <DialogContent className="glass-strong rounded-3xl border-border sm:max-w-xl max-h-[85vh] flex flex-col p-4 sm:p-6 overflow-hidden">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-lg font-bold">
             <Bell className="h-5 w-5 text-primary" /> Caller Tune & Ringtone
           </DialogTitle>
         </DialogHeader>
 
-        {/* Tab switcher: Presets vs YouTube Search */}
-        <div className="flex rounded-2xl bg-white/5 p-1 text-xs font-semibold">
-          <button
-            type="button"
-            onClick={() => {
-              setTab("presets");
-              setPreviewYtId(null);
-            }}
-            className={`flex-1 rounded-xl py-2 transition ${
-              tab === "presets" ? "bg-primary text-primary-foreground shadow" : "text-muted-foreground hover:text-white"
-            }`}
-          >
-            🎵 System Presets
-          </button>
+        {/* ট্যাব সুইচ */}
+        <div className="flex rounded-2xl bg-white/5 p-1 text-xs font-semibold shrink-0">
           <button
             type="button"
             onClick={() => {
@@ -114,15 +91,128 @@ export function RingtoneDialog({
               stopRingtone();
             }}
             className={`flex-1 rounded-xl py-2 transition flex items-center justify-center gap-1.5 ${
-              tab === "youtube" ? "bg-destructive text-white shadow" : "text-muted-foreground hover:text-white"
+              tab === "youtube" ? "bg-red-600 text-white shadow" : "text-muted-foreground hover:text-white"
             }`}
           >
             <Youtube className="h-4 w-4" /> YouTube Songs
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              setTab("presets");
+              setActivePreviewId(null);
+            }}
+            className={`flex-1 rounded-xl py-2 transition ${
+              tab === "presets" ? "bg-primary text-primary-foreground shadow" : "text-muted-foreground hover:text-white"
+            }`}
+          >
+            🎵 System Presets
+          </button>
         </div>
 
-        {tab === "presets" ? (
-          <div className="mt-2 flex flex-col gap-2 max-h-[55vh] overflow-y-auto pr-1 scroll-soft">
+        {tab === "youtube" ? (
+          <div className="mt-3 flex flex-1 flex-col gap-3 overflow-hidden">
+            {/* সার্চ ফর্ম */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                triggerSearch(ytQuery);
+              }}
+              className="relative shrink-0"
+            >
+              <input
+                type="text"
+                value={ytQuery}
+                onChange={(e) => setYtQuery(e.target.value)}
+                placeholder="Search any YouTube song or artist..."
+                className="w-full rounded-2xl border border-white/20 bg-input px-4 py-2.5 pl-10 pr-20 text-xs text-white placeholder-muted-foreground outline-none focus:ring-2 focus:ring-primary/50"
+              />
+              <Search className="absolute left-3.5 top-3 h-4 w-4 text-muted-foreground" />
+              <button
+                type="submit"
+                className="absolute right-1.5 top-1.5 rounded-xl bg-red-600 px-3 py-1 text-xs font-bold text-white transition hover:opacity-90"
+              >
+                Search
+              </button>
+            </form>
+
+            {/* প্রিভিউ অডিও প্লেয়ার ফ্রেম */}
+            {activePreviewId && (
+              <div className="rounded-2xl border border-white/20 bg-black p-2 shrink-0">
+                <div className="aspect-video w-full max-h-36 overflow-hidden rounded-xl">
+                  <iframe
+                    src={`https://www.youtube-nocookie.com/embed/${activePreviewId}?autoplay=1`}
+                    title="Preview"
+                    allow="autoplay"
+                    className="h-full w-full border-0"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* শত শত রিয়েল গানের তালিকা */}
+            <div className="flex-1 overflow-y-auto pr-1 scroll-soft flex flex-col gap-2">
+              {searching ? (
+                <div className="grid h-32 place-items-center">
+                  <Loader2 className="h-6 w-6 animate-spin text-red-500" />
+                </div>
+              ) : (
+                searchResults.map((vid) => {
+                  const tuneKey = `yt:${vid.id}`;
+                  const isCurrent = selected === tuneKey;
+                  const isPreviewing = activePreviewId === vid.id;
+
+                  return (
+                    <div
+                      key={vid.id}
+                      className={`glass flex items-center justify-between rounded-2xl p-2.5 transition ${
+                        isCurrent ? "border-primary/50 bg-primary/10" : "hover:bg-white/5"
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <img
+                          src={vid.thumbnail}
+                          alt={vid.title}
+                          className="h-12 w-16 rounded-xl object-cover shrink-0"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="line-clamp-1 text-xs font-semibold text-white">
+                            {vid.title}
+                          </p>
+                          <p className="text-[11px] text-muted-foreground truncate">{vid.channel}</p>
+                          {isCurrent && <span className="text-[10px] text-primary font-bold">(Active Ringtone)</span>}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                        <button
+                          type="button"
+                          onClick={() => setActivePreviewId(isPreviewing ? null : vid.id)}
+                          className="grid h-8 w-8 place-items-center rounded-full bg-white/10 hover:bg-white/20 text-white"
+                          title="Preview"
+                        >
+                          {isPreviewing ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5 ml-0.5" />}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleSelectRingtone(tuneKey, vid.title)}
+                          className={`grid h-8 w-8 place-items-center rounded-full transition ${
+                            isCurrent ? "bg-primary text-white" : "border border-white/20 text-muted-foreground hover:text-white"
+                          }`}
+                          title="Set as Ringtone"
+                        >
+                          <Check className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 flex flex-1 flex-col gap-2 overflow-y-auto pr-1 scroll-soft">
             {RINGTONE_PRESETS.map((preset) => {
               const isSelected = selected === preset.id;
               const isPlaying = playingId === preset.id;
@@ -136,17 +226,17 @@ export function RingtoneDialog({
                 >
                   <div
                     className="flex flex-1 items-center gap-3 cursor-pointer"
-                    onClick={() => handleSelect(preset.id, preset.name)}
+                    onClick={() => handleSelectRingtone(preset.id, preset.name)}
                   >
                     <div
-                      className={`grid h-10 w-10 shrink-0 place-items-center rounded-full transition ${
-                        isSelected ? "bg-primary text-primary-foreground" : "bg-white/10 text-foreground"
+                      className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${
+                        isSelected ? "bg-primary text-white" : "bg-white/10 text-foreground"
                       }`}
                     >
                       <Music className="h-5 w-5" />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-semibold truncate flex items-center gap-1.5">
+                      <p className="text-xs font-semibold truncate flex items-center gap-1.5">
                         {preset.name}
                         {isSelected && <span className="text-[10px] text-primary font-bold">(Active)</span>}
                       </p>
@@ -157,24 +247,26 @@ export function RingtoneDialog({
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => handlePlayPreset(preset.id)}
-                      title={isPlaying ? "Stop Preview" : "Preview Sound"}
-                      className={`grid h-9 w-9 place-items-center rounded-full transition ${
-                        isPlaying
-                          ? "bg-destructive text-destructive-foreground animate-pulse"
-                          : "bg-white/10 hover:bg-white/20 text-foreground"
-                      }`}
+                      onClick={() => {
+                        if (isPlaying) {
+                          stopRingtone();
+                          setPlayingId(null);
+                        } else {
+                          setPlayingId(preset.id);
+                          previewRingtone(preset.id);
+                          setTimeout(() => setPlayingId(null), 2000);
+                        }
+                      }}
+                      className="grid h-8 w-8 place-items-center rounded-full bg-white/10 text-white hover:bg-white/20"
                     >
-                      {isPlaying ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
+                      {isPlaying ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5 ml-0.5" />}
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => handleSelect(preset.id, preset.name)}
-                      className={`grid h-9 w-9 place-items-center rounded-full transition ${
-                        isSelected
-                          ? "bg-primary text-primary-foreground"
-                          : "border border-white/20 text-muted-foreground hover:text-foreground"
+                      onClick={() => handleSelectRingtone(preset.id, preset.name)}
+                      className={`grid h-8 w-8 place-items-center rounded-full ${
+                        isSelected ? "bg-primary text-white" : "border border-white/20 text-muted-foreground"
                       }`}
                     >
                       <Check className="h-4 w-4" />
@@ -184,95 +276,8 @@ export function RingtoneDialog({
               );
             })}
           </div>
-        ) : (
-          <div className="mt-2 flex flex-col gap-3">
-            <p className="text-xs text-muted-foreground">
-              ইউটিউবের যেকোনো গানের নাম লিখুন বা লিংক দিন। গানটি শুনে "Set as Ringtone" চাপলেই রিংটোন সেট হয়ে যাবে!
-            </p>
-
-            <form onSubmit={handleSearchYouTube} className="relative">
-              <input
-                type="text"
-                value={ytQuery}
-                onChange={(e) => setYtQuery(e.target.value)}
-                placeholder="গানের নাম বা YouTube link লিখুন..."
-                className="w-full rounded-2xl border border-white/20 bg-input px-4 py-2.5 pl-10 text-xs text-white placeholder-muted-foreground outline-none focus:ring-2 focus:ring-primary/50"
-              />
-              <Search className="absolute left-3.5 top-3 h-4 w-4 text-muted-foreground" />
-              <button
-                type="submit"
-                className="absolute right-2 top-1.5 rounded-xl bg-destructive px-3 py-1.5 text-[11px] font-bold text-white transition hover:opacity-90"
-              >
-                Search
-              </button>
-            </form>
-
-            {/* Quick Suggestions */}
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none text-xs">
-              {QUICK_SONGS.map((song) => (
-                <button
-                  key={song.id}
-                  type="button"
-                  onClick={() => {
-                    setPreviewYtId(song.id);
-                    setYtQuery(song.title);
-                  }}
-                  className="glass inline-flex items-center gap-1 rounded-xl px-2.5 py-1 text-[11px] text-white/90 hover:bg-white/20 shrink-0 transition"
-                >
-                  <Sparkles className="h-3 w-3 text-amber-300" />
-                  {song.label}
-                </button>
-              ))}
-            </div>
-
-            {/* YouTube Player Preview */}
-            {previewYtId && (
-              <div className="overflow-hidden rounded-2xl border border-white/10 bg-black">
-                <div className="relative aspect-video w-full">
-                  <iframe
-                    key={previewYtId}
-                    src={
-                      previewYtId.length === 11
-                        ? `https://www.youtube-nocookie.com/embed/${previewYtId}?autoplay=1&enablejsapi=1`
-                        : `https://www.youtube-nocookie.com/embed?listType=search&list=${previewYtId}&autoplay=1&enablejsapi=1`
-                    }
-                    title="YouTube Ringtone Preview"
-                    allow="autoplay; encrypted-media"
-                    className="h-full w-full border-0"
-                  />
-                </div>
-                <div className="flex items-center justify-between p-3 bg-white/5">
-                  <span className="text-xs font-semibold text-white/90 truncate max-w-[240px]">
-                    {ytQuery || "Selected YouTube Track"}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => handleSelect(`yt:${previewYtId}`, ytQuery || "YouTube Track")}
-                    className="gradient-romance inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-bold text-white shadow transition hover:scale-105"
-                  >
-                    <Check className="h-3.5 w-3.5" />
-                    Set as Ringtone
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {selected.startsWith("yt:") && (
-              <div className="glass flex items-center justify-between rounded-2xl p-3 border-primary/50 bg-primary/10">
-                <div className="flex items-center gap-2">
-                  <Youtube className="h-5 w-5 text-destructive" />
-                  <div>
-                    <p className="text-xs font-bold text-white">Current Active Tune: Custom YouTube</p>
-                    <p className="text-[10px] text-muted-foreground truncate max-w-[200px]">{selected}</p>
-                  </div>
-                </div>
-                <span className="text-[10px] text-primary font-bold">(Active)</span>
-              </div>
-            )}
-          </div>
         )}
       </DialogContent>
     </Dialog>
   );
 }
-
