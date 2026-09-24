@@ -1,23 +1,40 @@
-// Live wallpapers pulled from an online photo service (Picsum / Unsplash library).
-const LIST_URL = "https://picsum.photos/v2/list";
+// Infinite random wallpapers — every generated seed maps to a different real
+// photo, so there is no fixed list and no hardcoded picture link anywhere.
+export type Wallpaper = { id: string; url: string };
 
-export type Wallpaper = { id: string; url: string; author: string };
-
-function sized(id: string) {
-  return `https://picsum.photos/id/${id}/1920/1200`;
+function seed(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}${Math.random()
+    .toString(36)
+    .slice(2, 6)}`;
 }
 
-const FALLBACK_IDS = ["1015", "1016", "1018", "1036", "1043", "1039"];
+export function randomWallpaper(): Wallpaper {
+  const id = seed();
+  return { id, url: `https://picsum.photos/seed/${id}/1920/1200` };
+}
 
-export async function fetchWallpapers(count = 8): Promise<Wallpaper[]> {
-  try {
-    const page = 1 + Math.floor(Math.random() * 10);
-    const res = await fetch(`${LIST_URL}?page=${page}&limit=30`);
-    if (!res.ok) throw new Error("bad response");
-    const list = (await res.json()) as { id: string; author: string }[];
-    const shuffled = list.sort(() => Math.random() - 0.5).slice(0, count);
-    return shuffled.map((p) => ({ id: p.id, url: sized(p.id), author: p.author }));
-  } catch {
-    return FALLBACK_IDS.map((id) => ({ id, url: sized(id), author: "Picsum" }));
+// Different photo provider, used only if the first one fails to load
+export function fallbackWallpaperUrl(): string {
+  return `https://loremflickr.com/1920/1200/all?lock=${Math.floor(Math.random() * 999999)}`;
+}
+
+export function preloadWallpaper(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(true);
+    img.onerror = () => resolve(false);
+    img.src = url;
+  });
+}
+
+// Grab the next wallpaper: fresh random seed, verified by preload so the
+// visible background never flashes to an empty frame
+export async function nextWallpaper(): Promise<Wallpaper | null> {
+  for (let i = 0; i < 3; i++) {
+    const wall = randomWallpaper();
+    if (await preloadWallpaper(wall.url)) return wall;
+    const fb = fallbackWallpaperUrl();
+    if (await preloadWallpaper(fb)) return { id: wall.id, url: fb };
   }
+  return null;
 }

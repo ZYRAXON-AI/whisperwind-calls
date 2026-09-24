@@ -31,18 +31,22 @@ function Stream({
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
-    if (ref.current) ref.current.srcObject = stream;
+    const el = ref.current;
+    if (!el) return;
+    el.srcObject = stream;
+    // Video elements are visuals only — still kick play() so they don't stall
+    void el.play().catch(() => undefined);
   }, [stream]);
   return <video ref={ref} autoPlay playsInline muted={muted} className={className} />;
 }
 
-// Remote audio MUST live on its own element — audio-only tiles only show avatars
+// Remote audio MUST live on its own element — every remote's sound plays here
+// (video tiles stay muted so there is exactly one audio path per peer)
 function RemoteAudio({ stream }: { stream: MediaStream | null | undefined }) {
   const ref = useRef<HTMLAudioElement>(null);
   useEffect(() => {
     const el = ref.current;
     if (!el || !stream) return;
-    let n = 0;
     const kick = () => {
       el.muted = false;
       el.volume = 1;
@@ -57,18 +61,20 @@ function RemoteAudio({ stream }: { stream: MediaStream | null | undefined }) {
     kick();
     const onAdd = () => kick();
     stream.addEventListener("addtrack", onAdd);
-    // Autoplay can be blocked until a gesture — keep retrying briefly
+    // Autoplay can block until a gesture/tab is visible — keep knocking until
+    // the element is actually playing (no fixed retry cap)
     const timer = window.setInterval(() => {
-      kick();
-      n += 1;
-      if (n >= 15) window.clearInterval(timer);
-    }, 800);
+      if (el.paused || el.muted) kick();
+    }, 900);
     const onGesture = () => kick();
+    const onVisible = () => kick();
     document.addEventListener("pointerdown", onGesture, { once: true });
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       stream.removeEventListener("addtrack", onAdd);
       window.clearInterval(timer);
       document.removeEventListener("pointerdown", onGesture);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [stream]);
   if (!stream) return null;
@@ -106,7 +112,8 @@ function ParticipantTile({
       } border border-white/15 bg-black/50 shadow-inner ${className}`}
     >
       {showVideo && stream ? (
-        <Stream stream={stream} muted={muted} className="h-full w-full object-cover" />
+        // Always muted — every peer's sound comes through RemoteAudio instead
+        <Stream stream={stream} muted className="h-full w-full object-cover" />
       ) : (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-4">
           <Avatar profile={profile} className="h-20 w-20 sm:h-24 sm:w-24" />
@@ -149,11 +156,10 @@ export function CallPanel({
 
   if (call.status === "idle") return null;
 
-  // Audio-only remotes have no <video> to play sound — pump them on <audio>
-  // (video tiles already play their own audio; don't double up)
-  const remoteAudioNodes = remoteIds
-    .filter((id) => !hasVideoTrack(call.remoteStreams[id]))
-    .map((id) => <RemoteAudio key={`audio-${id}`} stream={call.remoteStreams[id]} />);
+  // One <audio> pump per remote — video or audio, sound always has a home
+  const remoteAudioNodes = remoteIds.map((id) => (
+    <RemoteAudio key={`audio-${id}`} stream={call.remoteStreams[id]} />
+  ));
 
   // Incoming Call Dialog
   if (call.status === "incoming") {
@@ -306,7 +312,7 @@ export function CallPanel({
 
         <div className="relative mt-2 h-36 w-full overflow-hidden rounded-2xl bg-black">
           {hasVideoTrack(firstRemote ?? null) && firstRemote ? (
-            <Stream stream={firstRemote} className="h-full w-full object-cover" />
+            <Stream stream={firstRemote} muted className="h-full w-full object-cover" />
           ) : (
             <div className="flex h-full w-full flex-col items-center justify-center gap-2">
               <Users className="h-6 w-6 text-primary" />

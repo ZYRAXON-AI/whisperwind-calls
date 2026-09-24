@@ -6,6 +6,7 @@ import {
   type CallRow,
   broadcastInviteCancel,
   broadcastInviteDeclined,
+  broadcastRingBack,
   countJoinedMembers,
   createCall,
   endCallRoom,
@@ -22,11 +23,12 @@ import {
   subscribeCallInvites,
   subscribeInviteCancels,
   subscribeInviteDeclines,
+  subscribeRingBacks,
   subscribeRoomCloses,
   subscribeRoomOpens,
 } from "@/lib/calls";
 import { pushNotify } from "@/lib/push";
-import { stopRingtone } from "@/lib/sounds";
+import { getSavedRingtone, stopRingtone } from "@/lib/sounds";
 
 const ICE: RTCConfiguration = {
   iceServers: [
@@ -126,6 +128,9 @@ export function useCall(userId: string | null) {
   const [sharingScreen, setSharingScreen] = useState(false);
   const [peerSharingScreen, setPeerSharingScreen] = useState(false);
   const [callerRingtone, setCallerRingtone] = useState("classic");
+  // OUR side: outgoing=true → we placed the call (we hear THEIR ringtone)
+  const [outgoing, setOutgoing] = useState(false);
+  const [peerRingtone, setPeerRingtone] = useState("");
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
   const [incoming, setIncoming] = useState<IncomingCall | null>(null);
@@ -142,6 +147,10 @@ export function useCall(userId: string | null) {
   const peerIdRef = useRef<string | null>(null);
   const lastCallRowRef = useRef<CallRow | null>(null);
   const declinedCallIdsRef = useRef<Set<string>>(new Set());
+  // Offer/ICE bookkeeping — broadcasts are fire-and-forget, so we must be able to resend
+  const answeredRef = useRef<Set<string>>(new Set());
+  const iceSentRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+  const lastOfferSentRef = useRef<Map<string, number>>(new Map());
 
   const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteRef = useRef<Map<string, MediaStream>>(new Map());
@@ -166,6 +175,16 @@ export function useCall(userId: string | null) {
   useEffect(() => {
     withVideoRef.current = withVideo;
   }, [withVideo]);
+
+  // When WE are the callee: answer the invite with our own saved ringtone so
+  // the caller hears it on their side (sent twice — broadcasts can drop)
+  const announceRingBack = useCallback((callId: string, callerId: string) => {
+    const me = userIdRef.current;
+    if (!me || !callId || !callerId || callerId === me) return;
+    const tone = getSavedRingtone();
+    broadcastRingBack(callId, callerId, tone);
+    window.setTimeout(() => broadcastRingBack(callId, callerId, tone), 900);
+  }, []);
 
   // Call events go into messages table → show up in chat like normal messages
   const logCallEvent = useCallback(async (body: string, recipient: string | null) => {
@@ -228,6 +247,48 @@ export function useCall(userId: string | null) {
     });
   }, []);
 
+  // Re-trickle every candidate we already gathered — early ones are usually
+  // broadcast before the peer even joins the channel (dropped silently)
+  const sendStoredIce = useCallback(
+    (peerId: string) => {
+      const list = iceSentRef.current.get(peerId);
+      if (!list?.length) return;
+      for (const c of list) send({ to: peerId, kind: "ice", candidate: c });
+    },
+    [send]
+  );
+
+  // Belt & braces: make sure our mic/cam is really attached and sending.
+  // replaceTrack/direction can silently fail during offer/answer shuffling.
+  const ensureSenders = useCallback((peerId: string) => {
+    const pc = pcsRef.current.get(peerId);
+    const local = localRef.current;
+    if (!pc || !local || pc.signalingState === "closed") return;
+    const a = local.getAudioTracks()[0];
+    const v = screenRef.current?.getVideoTracks()[0] ?? local.getVideoTracks()[0];
+    for (const tx of pc.getTransceivers()) {
+      const kind = tx.receiver.track?.kind;
+      try {
+        if (kind === "audio" && a) {
+          if (tx.sender.track !== a) void tx.sender.replaceTrack(a);
+          if (tx.direction !== "sendrecv") tx.direction = "sendrecv";
+        }
+        if (kind === "video" && v) {
+          if (tx.sender.track !== v) void tx.sender.replaceTrack(v);
+          if (tx.direction !== "sendrecv") tx.direction = "sendrecv";
+        }
+      } catch {}
+    }
+    try {
+      if (a && !pc.getTransceivers().some((t) => t.receiver.track?.kind === "audio")) {
+        pc.addTrack(a, local);
+      }
+      if (v && !pc.getTransceivers().some((t) => t.receiver.track?.kind === "video")) {
+        pc.addTrack(v, local);
+      }
+    } catch {}
+  }, []);
+
   const closePeer = useCallback(
     (peerId: string) => {
       const pc = pcsRef.current.get(peerId);
@@ -243,6 +304,9 @@ export function useCall(userId: string | null) {
       pendingIceRef.current.delete(peerId);
       makingOfferRef.current.delete(peerId);
       sharersRef.current.delete(peerId);
+      answeredRef.current.delete(peerId);
+      iceSentRef.current.delete(peerId);
+      lastOfferSentRef.current.delete(peerId);
       setPeerSharingScreen(sharersRef.current.size > 0);
       const remote = remoteRef.current.get(peerId);
       if (remote) {
@@ -263,19 +327,37 @@ export function useCall(userId: string | null) {
       const pc = pcsRef.current.get(peerId);
       if (!pc) return;
       if (makingOfferRef.current.has(peerId)) return;
+
+      // The very first offer is usually broadcast before the peer joins the
+      // channel and vanishes. If we're still waiting for their answer, resend
+      // the SAME offer (throttled) instead of deadlocking in have-local-offer.
+      if (pc.signalingState === "have-local-offer" && pc.localDescription && !iceRestart) {
+        const last = lastOfferSentRef.current.get(peerId) ?? 0;
+        if (Date.now() - last > 1500) {
+          lastOfferSentRef.current.set(peerId, Date.now());
+          send({ to: peerId, kind: "offer", sdp: pc.localDescription });
+          sendStoredIce(peerId);
+        }
+        return;
+      }
+
       if (pc.signalingState !== "stable") return;
+      // Negotiation already succeeded — never churn a healthy link from the heal loop
+      if (answeredRef.current.has(peerId) && !iceRestart && pc.connectionState !== "failed") return;
+
       try {
         makingOfferRef.current.add(peerId);
         const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
         if (pc.signalingState !== "stable") return;
         await pc.setLocalDescription(offer);
+        lastOfferSentRef.current.set(peerId, Date.now());
         send({ to: peerId, kind: "offer", sdp: pc.localDescription });
       } catch {
       } finally {
         makingOfferRef.current.delete(peerId);
       }
     },
-    [send]
+    [send, sendStoredIce]
   );
 
   // answerOnly: wait for remote offer before attaching local tracks (avoids m-line glare)
@@ -329,17 +411,26 @@ export function useCall(userId: string | null) {
         e.streams[0]?.getTracks().forEach(add);
         e.track?.addEventListener("unmute", () => publishRemotes());
         e.track?.addEventListener("mute", () => publishRemotes());
+        // Their track arrived → make sure OUR mic is attached too (silent-send fix)
+        ensureSenders(peerId);
         publishRemotes();
         setStatus((s) => (s === "calling" || s === "incoming" ? "connected" : s));
       };
 
       pc.onicecandidate = (e) => {
-        if (e.candidate) send({ to: peerId, kind: "ice", candidate: e.candidate.toJSON() });
+        if (!e.candidate) return;
+        const json = e.candidate.toJSON();
+        const list = iceSentRef.current.get(peerId) ?? [];
+        list.push(json);
+        iceSentRef.current.set(peerId, list);
+        send({ to: peerId, kind: "ice", candidate: json });
       };
 
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === "connected") {
           answerReady = true;
+          // Link is up — guarantee our mic/cam senders are attached and sendrecv
+          ensureSenders(peerId);
           setStatus((s) => (s === "calling" || s === "incoming" ? "connected" : s));
         }
         if (pc.connectionState === "failed") {
@@ -379,7 +470,7 @@ export function useCall(userId: string | null) {
       }
       return pc;
     },
-    [makeOffer, publishRemotes, send]
+    [ensureSenders, makeOffer, publishRemotes, send]
   );
 
   // Only the lower userId creates the initial peer+offer — no double-offer glare
@@ -387,12 +478,19 @@ export function useCall(userId: string | null) {
     (peerId: string) => {
       const me = userIdRef.current;
       if (!me || !peerId || peerId === me || !localRef.current) return;
+      const existing = pcsRef.current.get(peerId);
+      // Healthy link — never churn it from heal/discovery
+      if (existing && existing.connectionState === "connected" && existing.remoteDescription) return;
       if (!shouldOfferTo(me, peerId)) {
         // Higher id waits — only nudge the lower id to (re)send the offer
         send({ to: peerId, kind: "hello" });
         return;
       }
-      if (!pcsRef.current.has(peerId)) createPeer(peerId, false);
+      const pc = existing ?? createPeer(peerId, false);
+      if (!pc) return;
+      // Offer already answered and ICE still checking → only re-trickle ICE,
+      // never stack a fresh renegotiation on top of a working handshake
+      if (pc.remoteDescription && pc.connectionState !== "failed") return;
       void makeOffer(peerId);
     },
     [createPeer, makeOffer, send]
@@ -419,6 +517,7 @@ export function useCall(userId: string | null) {
 
       if (payload.kind === "hello") {
         // Peer is waiting for our offer — make sure we have a PC with local tracks
+        sendStoredIce(from);
         if (shouldOfferTo(userIdRef.current, from)) {
           if (!pcsRef.current.has(from)) createPeer(from, false);
           void makeOffer(from);
@@ -444,6 +543,8 @@ export function useCall(userId: string | null) {
       if (payload.kind === "offer") {
         if (!payload.sdp) return;
         const existingPc = pcsRef.current.get(from);
+        // Already applying an offer from this peer — let that pass finish first
+        if (existingPc?.signalingState === "have-remote-offer") return;
         const pc = existingPc ?? createPeer(from, true);
         if (!pc) return;
         try {
@@ -454,46 +555,9 @@ export function useCall(userId: string | null) {
             await pc.setLocalDescription({ type: "rollback" });
           }
           await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-          // Attach our mic/cam onto the transceivers the remote offer opened
-          const local = localRef.current;
-          if (local) {
-            const a = local.getAudioTracks()[0];
-            const v = screenRef.current?.getVideoTracks()[0] ?? local.getVideoTracks()[0];
-            let audioTx = pc.getTransceivers().find((t) => t.receiver.track?.kind === "audio");
-            let videoTx = pc.getTransceivers().find((t) => t.receiver.track?.kind === "video");
-            if (a && !audioTx) {
-              try {
-                pc.addTrack(a, local);
-                audioTx = pc.getTransceivers().find((t) => t.receiver.track?.kind === "audio");
-              } catch {}
-            }
-            if (v && !videoTx) {
-              try {
-                pc.addTrack(v, local);
-                videoTx = pc.getTransceivers().find((t) => t.receiver.track?.kind === "video");
-              } catch {}
-            }
-            if (a && audioTx) {
-              try {
-                await audioTx.sender.replaceTrack(a);
-                audioTx.direction = "sendrecv";
-              } catch {}
-            }
-            if (v && videoTx) {
-              try {
-                await videoTx.sender.replaceTrack(v);
-                videoTx.direction = "sendrecv";
-              } catch {}
-            }
-            // Force sendrecv on every transceiver so our mic actually goes out
-            for (const tx of pc.getTransceivers()) {
-              try {
-                const k = tx.receiver.track?.kind;
-                if (k === "audio" && a) tx.direction = "sendrecv";
-                if (k === "video" && v) tx.direction = "sendrecv";
-              } catch {}
-            }
-          }
+          // Attach our mic/cam onto the transceivers the remote offer opened —
+          // MUST happen before createAnswer so the answer actually says sendrecv
+          ensureSenders(from);
           await drainIce(from);
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
@@ -510,7 +574,13 @@ export function useCall(userId: string | null) {
         const pc = pcsRef.current.get(from);
         if (!pc) return;
         try {
-          await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+          // Duplicate answer (we resend offers until one lands) — skip the SDP,
+          // but still drain ICE and re-check our senders
+          if (pc.signalingState === "have-local-offer") {
+            await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+          }
+          answeredRef.current.add(from);
+          ensureSenders(from);
           await drainIce(from);
           (pc as RTCPeerConnection & { __markAnswerReady?: () => void }).__markAnswerReady?.();
           if (callIdRef.current) void setCallActive(callIdRef.current).catch(() => undefined);
@@ -518,7 +588,7 @@ export function useCall(userId: string | null) {
         } catch {}
       }
     },
-    [createPeer, drainIce, makeOffer, send]
+    [createPeer, drainIce, ensureSenders, makeOffer, send, sendStoredIce]
   );
 
   const localCleanup = useCallback(() => {
@@ -568,6 +638,8 @@ export function useCall(userId: string | null) {
     setPeerSharingScreen(false);
     setMicOn(true);
     setCamOn(true);
+    setOutgoing(false);
+    setPeerRingtone("");
   }, [closePeer, publishRemotes]);
 
   const joinChannel = useCallback(
@@ -603,10 +675,14 @@ export function useCall(userId: string | null) {
       });
 
       // Peer accepted — stop our invite ring for them (kills "another call" reopen)
+      // + immediately (re)send offer & ICE: our first broadcast likely fired
+      // before they subscribed to this channel and was dropped
       ch.on("broadcast", { event: "joined" }, ({ payload }) => {
         const p = payload as { from?: string; callId?: string };
         if (p?.from && p.from !== userIdRef.current && p.callId) {
           removeInvitee(p.callId, p.from);
+          discoverPeer(p.from);
+          sendStoredIce(p.from);
         }
       });
 
@@ -639,7 +715,7 @@ export function useCall(userId: string | null) {
         });
       });
     },
-    [closePeer, discoverPeer, handleSig, localCleanup]
+    [closePeer, discoverPeer, handleSig, localCleanup, sendStoredIce]
   );
 
   const loadOpenCalls = useCallback(
@@ -679,9 +755,10 @@ export function useCall(userId: string | null) {
         setCallerRingtone(inv.call.ringtone);
         statusRef.current = "incoming";
         setStatus("incoming");
+        announceRingBack(inv.call.id, inv.call.created_by);
       }
     },
-    [localCleanup, userId]
+    [announceRingBack, localCleanup, userId]
   );
 
   // realtime invites (broadcast bus + personal inbox) + call status + initial load
@@ -771,6 +848,7 @@ export function useCall(userId: string | null) {
       setCallerRingtone(inv.ringtone);
       statusRef.current = "incoming";
       setStatus("incoming");
+      announceRingBack(inv.callId, inv.callerId);
     };
 
     const handleCancel = (c: { callId: string }) => {
@@ -788,6 +866,13 @@ export function useCall(userId: string | null) {
 
     const handleDeclined = () => {
       // We are the caller — someone declined; nothing to reopen on our side
+    };
+
+    // Callee replied with THEIR ringtone — the caller plays that one
+    const handleRingBack = (p: { callId?: string; to?: string; ringtone?: string }) => {
+      if (!p?.callId || !p.ringtone || p.to !== userIdRef.current) return;
+      if (callIdRef.current && callIdRef.current !== p.callId) return;
+      setPeerRingtone(p.ringtone);
     };
 
     const handleRoomOpen = (row: CallRow) => {
@@ -811,6 +896,7 @@ export function useCall(userId: string | null) {
     const offInvite = subscribeCallInvites(handleInvite);
     const offCancel = subscribeInviteCancels(handleCancel);
     const offDeclined = subscribeInviteDeclines(handleDeclined);
+    const offRingBack = subscribeRingBacks(handleRingBack);
     const offRoomOpen = subscribeRoomOpens(handleRoomOpen);
     const offRoomClose = subscribeRoomCloses(handleRoomClose);
     const offInbox = ensurePersonalInviteInbox(userId, handleInvite, handleCancel, handleDeclined);
@@ -820,12 +906,13 @@ export function useCall(userId: string | null) {
       offInvite();
       offCancel();
       offDeclined();
+      offRingBack();
       offRoomOpen();
       offRoomClose();
       offInbox();
       supabase.removeChannel(ch);
     };
-  }, [loadOpenCalls, userId]);
+  }, [announceRingBack, loadOpenCalls, userId]);
 
   const enteringRef = useRef(false);
 
@@ -871,6 +958,14 @@ export function useCall(userId: string | null) {
         callIdRef.current = callId;
         setCurrentCallId(callId);
         setWithVideo(video);
+        // Are WE the one who placed this call? (we then hear the callee's ringtone)
+        setOutgoing(
+          Boolean(
+            lastCallRowRef.current &&
+              lastCallRowRef.current.id === callId &&
+              lastCallRowRef.current.created_by === userId
+          )
+        );
         withVideoRef.current = video;
         callStartedAtRef.current = Date.now();
         setIncoming(null);
@@ -904,6 +999,9 @@ export function useCall(userId: string | null) {
             }
           }
         }
+        // DM: nudge the known peer immediately (presence may not list them yet) —
+        // this is what makes "the other side joined" connect fast
+        if (peerIdRef.current) discoverPeer(peerIdRef.current);
         void logCallEvent(`${video ? "Video" : "Audio"} call started`, peerIdRef.current);
 
         const announceRow: CallRow =
@@ -915,7 +1013,7 @@ export function useCall(userId: string | null) {
                 peer_id: peerIdRef.current,
                 created_by: userId,
                 with_video: video,
-                ringtone: "",
+                ringtone: getSavedRingtone(),
                 status: "active",
                 created_at: new Date().toISOString(),
                 ended_at: null,
@@ -993,8 +1091,10 @@ export function useCall(userId: string | null) {
     statusRef.current = "calling";
     setStatus("calling");
     stopRingtone();
+    // We are the CALLEE here — refresh our row so enterCall knows outgoing=false
+    lastCallRowRef.current = joinableCalls.find((c) => c.id === id) ?? null;
     return enterCall(id, incoming.withVideo);
-  }, [enterCall, incoming]);
+  }, [enterCall, incoming, joinableCalls]);
 
   const decline = useCallback(async () => {
     if (!userId || !incoming) return;
@@ -1138,14 +1238,26 @@ export function useCall(userId: string | null) {
     }
   }, [stopScreenShare]);
 
-  // Heal signaling: if still waiting for remote media, re-discover peers
+  // Heal signaling: re-trickle ICE + re-discover peers until media actually flows.
+  // discoverPeer/makeOffer are guarded — a healthy link is never renegotiated.
   useEffect(() => {
     if (status !== "calling" && status !== "connected") return;
     if (!userId) return;
     const t = window.setInterval(() => {
-      if (remoteRef.current.size > 0) return;
       const callId = callIdRef.current;
       if (!callId || !localRef.current) return;
+      // Candidates sent before the peer joined are dropped — resend them while
+      // any link is still negotiating (duplicate ICE is harmless)
+      for (const [id, pc] of pcsRef.current) {
+        if (pc.connectionState !== "connected") sendStoredIce(id);
+      }
+      // Stop only when real MEDIA arrived (an empty placeholder stream from
+      // createPeer must not blind the heal loop)
+      let hasMedia = false;
+      remoteRef.current.forEach((s) => {
+        if (s.getTracks().length) hasMedia = true;
+      });
+      if (hasMedia) return;
       void getJoinedPeers(callId, userId)
         .then((peers) => peers.forEach((p) => discoverPeer(p)))
         .catch(() => undefined);
@@ -1158,9 +1270,9 @@ export function useCall(userId: string | null) {
           }
         }
       }
-    }, 1200);
+    }, 1500);
     return () => window.clearInterval(t);
-  }, [status, userId, discoverPeer]);
+  }, [status, userId, discoverPeer, sendStoredIce]);
 
   // unmount: best-effort leave so the room doesn't stay ghost-joined
   useEffect(() => {
@@ -1180,6 +1292,8 @@ export function useCall(userId: string | null) {
     sharingScreen,
     peerSharingScreen,
     callerRingtone,
+    outgoing,
+    peerRingtone,
     localStream,
     remoteStreams,
     incoming,

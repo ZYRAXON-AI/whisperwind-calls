@@ -18,6 +18,7 @@ import {
 import { toast } from "sonner";
 
 import { Avatar } from "./Avatar";
+import { Backdrop } from "../Backdrop";
 import { CallPanel } from "./CallPanel";
 import { Conversation } from "./Conversation";
 import { FriendsPanel } from "./FriendsPanel";
@@ -35,6 +36,7 @@ import {
 } from "@/lib/social";
 import {
   ensureNotificationPermission,
+  getSavedRingtone,
   notify,
   playCallAlert,
   playMessageSound,
@@ -171,7 +173,9 @@ export function ChatRoom({
     };
   }, [loadProfiles, loadFriendships, user.id]);
 
-  // Incoming call ringtone (caller-selected) + loud background notify + vibrate
+  // Ringing on BOTH sides:
+  //  • callee hears the CALLER's chosen ringtone (invite carries it)
+  //  • caller hears the CALLEE's ringtone (sent back via ring_back; own tone until it arrives)
   const profilesRef = useRef(profiles);
   useEffect(() => {
     profilesRef.current = profiles;
@@ -194,6 +198,10 @@ export function ChatRoom({
       try {
         navigator.vibrate?.([500, 200, 500, 200, 700]);
       } catch {}
+    } else if (call.status === "calling" && call.outgoing) {
+      // We placed the call — ring with THEIR ringtone (fallback: our own preset)
+      unlockSound();
+      startRingtone(call.peerRingtone || getSavedRingtone());
     } else {
       stopRingtone();
       try {
@@ -206,7 +214,13 @@ export function ChatRoom({
         navigator.vibrate?.(0);
       } catch {}
     };
-  }, [call.status, call.callerRingtone, call.incoming]);
+  }, [
+    call.status,
+    call.callerRingtone,
+    call.incoming,
+    call.outgoing,
+    call.peerRingtone,
+  ]);
 
   const friendIds = useMemo(() => friendIdsOf(friendships, user.id), [friendships, user.id]);
   const friends = friendIds.map((id) => profiles[id]).filter(Boolean) as Profile[];
@@ -296,6 +310,8 @@ export function ChatRoom({
 
   return (
     <div className="relative flex h-dvh w-full overflow-hidden p-0 sm:p-3">
+      {/* Random rotating wallpaper behind the whole chat (changes every 15s) */}
+      <Backdrop />
       {/* Mobile Sidebar Overlay */}
       {navOpen && (
         <div

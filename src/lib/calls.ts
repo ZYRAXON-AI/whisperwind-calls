@@ -38,6 +38,8 @@ export type CallInvite = {
 
 export type InviteCancel = { callId: string; callerId: string };
 export type InviteDeclined = { callId: string; userId: string; callerId: string };
+// Callee answers the invite with ITS OWN ringtone so the caller hears that one
+export type RingBack = { callId: string; to: string; ringtone: string };
 
 // calls/call_members may be missing until migration runs — bypass typed client
 const raw = () => supabase as unknown as SupabaseClient;
@@ -64,11 +66,13 @@ type CancelHandler = (cancel: InviteCancel) => void;
 type RoomHandler = (row: CallRow) => void;
 type RoomCloseHandler = (payload: { callId: string }) => void;
 type DeclinedHandler = (payload: InviteDeclined) => void;
+type RingBackHandler = (payload: RingBack) => void;
 const inviteHandlers = new Set<InviteHandler>();
 const cancelHandlers = new Set<CancelHandler>();
 const roomOpenHandlers = new Set<RoomHandler>();
 const roomCloseHandlers = new Set<RoomCloseHandler>();
 const declinedHandlers = new Set<DeclinedHandler>();
+const ringBackHandlers = new Set<RingBackHandler>();
 const inboxChannels = new Map<string, RealtimeChannel>();
 let inviteCh: RealtimeChannel | null = null;
 let inviteReady: Promise<void> = Promise.resolve();
@@ -140,6 +144,15 @@ function ensureInviteChannel(): RealtimeChannel {
       } catch {}
     });
   });
+  ch.on("broadcast", { event: "ring_back" }, ({ payload }) => {
+    const r = payload as RingBack | null;
+    if (!r?.callId || !r.to || !r.ringtone) return;
+    ringBackHandlers.forEach((h) => {
+      try {
+        h(r);
+      } catch {}
+    });
+  });
   inviteCh = ch;
   inviteReady = waitChannel(ch);
   return ch;
@@ -194,6 +207,16 @@ export function ensurePersonalInviteInbox(
       }
     });
   }
+  ch.on("broadcast", { event: "ring_back" }, ({ payload }) => {
+    const r = payload as RingBack | null;
+    if (r?.callId && r.to && r.ringtone) {
+      ringBackHandlers.forEach((h) => {
+        try {
+          h(r);
+        } catch {}
+      });
+    }
+  });
   ch.subscribe();
   inboxChannels.set(userId, ch);
   return () => {
@@ -211,6 +234,30 @@ export function subscribeInviteDeclines(handler: DeclinedHandler): () => void {
   return () => {
     declinedHandlers.delete(handler);
   };
+}
+
+export function subscribeRingBacks(handler: RingBackHandler): () => void {
+  ringBackHandlers.add(handler);
+  ensureInviteChannel();
+  return () => {
+    ringBackHandlers.delete(handler);
+  };
+}
+
+// Callee → caller: "this is MY ringtone, play it while you wait"
+export function broadcastRingBack(callId: string, to: string, ringtone: string): void {
+  if (!callId || !to || !ringtone) return;
+  const payload: RingBack = { callId, to, ringtone };
+  try {
+    const ch = ensureInviteChannel();
+    ch.send({ type: "broadcast", event: "ring_back", payload });
+  } catch {}
+  try {
+    const inbox = ensureInbox(to);
+    void waitChannel(inbox).then(() => {
+      inbox.send({ type: "broadcast", event: "ring_back", payload });
+    });
+  } catch {}
 }
 
 export function markInviteDeclined(callId: string, userId: string): void {
