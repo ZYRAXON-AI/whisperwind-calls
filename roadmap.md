@@ -1,10 +1,10 @@
 # Zyraxon roadmap
 
-- [x] Live online wallpapers (photo service, rotating)
-- [x] Friend requests + accept -> friend appears in left sidebar
-- [x] Private 1:1 chat per friend (RLS protected)
-- [x] Only own messages can be edited/deleted
-- [x] Facebook-style profile page
-- [x] Sidebar YouTube tab with embedded player
-- [x] Notification sound for messages + ringtone for incoming calls
-- [x] Mobile + desktop layout
+- [ ] Repair friend requests and accepted friend list
+- [ ] Make username-only guest entry work without cloud persistence
+- [ ] Make install control reliably explain or trigger installation across supported browsers
+- [ ] Repair call signaling and screen sharing between intended peers
+- [ ] Replace broken YouTube surface with the supported embedded YouTube experience
+- [ ] Add the ZYRAXO AI Community group for signed-in users
+- [ ] Add per-user GitHub connection and Monaco editor with PR/merge management
+- [ ] Verify desktop and mobile behavior
