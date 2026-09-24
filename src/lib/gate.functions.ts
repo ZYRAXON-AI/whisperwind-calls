@@ -1,22 +1,15 @@
 import { createServerFn } from "@tanstack/react-start";
 import { useSession } from "@tanstack/react-start/server";
-import { createHash, timingSafeEqual } from "node:crypto";
 
 type GateSession = { unlocked?: boolean };
 
 function config() {
   return {
-    password: process.env["SESSION_SECRET"]!,
+    password: process.env["SESSION_SECRET"] || "zyraxon-ultra-secure-key-32-characters-long!",
     name: "zyraxon-gate",
     maxAge: 60 * 60 * 24 * 365,
     cookie: { httpOnly: true, secure: true, sameSite: "lax" as const, path: "/" },
   };
-}
-
-function matches(input: string, expected: string) {
-  const a = createHash("sha256").update(input.trim(), "utf8").digest();
-  const b = createHash("sha256").update(expected.trim(), "utf8").digest();
-  return timingSafeEqual(a, b);
 }
 
 export const checkGate = createServerFn({ method: "GET" }).handler(async () => {
@@ -27,9 +20,17 @@ export const checkGate = createServerFn({ method: "GET" }).handler(async () => {
 export const unlockSite = createServerFn({ method: "POST" })
   .inputValidator((data: { password: string }) => data)
   .handler(async ({ data }) => {
-    const expected = process.env["SITE_PASSWORD"];
-    if (!expected) return { ok: false as const };
-    if (!matches(data.password ?? "", expected)) return { ok: false as const };
+    const input = (data.password ?? "").trim().toLowerCase();
+    const envPass = (process.env["SITE_PASSWORD"] ?? "").trim().toLowerCase();
+
+    // zyraxon, gyroxon, zyraxonai অথবা এনভায়রনমেন্ট ভ্যারিয়েবলের পাসওয়ার্ড গ্রহণ করবে
+    const valid = ["zyraxon", "gyroxon", "zyraxonai"];
+    if (envPass) valid.push(envPass);
+
+    if (!valid.includes(input)) {
+      return { ok: false as const };
+    }
+
     const session = await useSession<GateSession>(config());
     await session.update({ unlocked: true });
     return { ok: true as const };
