@@ -43,6 +43,7 @@ import {
   unlockSound,
 } from "@/lib/sounds";
 import { useCall } from "@/lib/useCall";
+import { initPushSubscription } from "@/lib/push";
 
 export function ChatRoom({
   user,
@@ -109,7 +110,8 @@ export function ChatRoom({
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
-  }, [loadProfiles, loadFriendships]);
+    void initPushSubscription(user.id);
+  }, [loadProfiles, loadFriendships, user.id]);
 
   useEffect(() => {
     const me = profiles[user.id];

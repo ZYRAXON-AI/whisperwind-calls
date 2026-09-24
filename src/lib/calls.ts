@@ -60,13 +60,19 @@ const RING_MS = 1200;
 
 type InviteHandler = (invite: CallInvite) => void;
 type CancelHandler = (cancel: InviteCancel) => void;
+type RoomHandler = (row: CallRow) => void;
+type RoomCloseHandler = (payload: { callId: string }) => void;
 const inviteHandlers = new Set<InviteHandler>();
 const cancelHandlers = new Set<CancelHandler>();
+const roomOpenHandlers = new Set<RoomHandler>();
+const roomCloseHandlers = new Set<RoomCloseHandler>();
 const inboxChannels = new Map<string, RealtimeChannel>();
 let inviteCh: RealtimeChannel | null = null;
 let inviteReady: Promise<void> = Promise.resolve();
 let ringTimer: ReturnType<typeof setInterval> | null = null;
 let ringInvites: CallInvite[] = [];
+let roomTimer: ReturnType<typeof setInterval> | null = null;
+let roomOpenRow: CallRow | null = null;
 
 function waitChannel(ch: RealtimeChannel): Promise<void> {
   if (ch.state === "SUBSCRIBED") return Promise.resolve();
@@ -99,6 +105,24 @@ function ensureInviteChannel(): RealtimeChannel {
     cancelHandlers.forEach((h) => {
       try {
         h(c);
+      } catch {}
+    });
+  });
+  ch.on("broadcast", { event: "room_open" }, ({ payload }) => {
+    const row = payload as CallRow | null;
+    if (!row?.id) return;
+    roomOpenHandlers.forEach((h) => {
+      try {
+        h(row);
+      } catch {}
+    });
+  });
+  ch.on("broadcast", { event: "room_closed" }, ({ payload }) => {
+    const c = payload as { callId?: string } | null;
+    if (!c?.callId) return;
+    roomCloseHandlers.forEach((h) => {
+      try {
+        h({ callId: c.callId });
       } catch {}
     });
   });
@@ -197,6 +221,56 @@ export function stopInviteRing(callId?: string): void {
   if (!ringInvites.length && ringTimer) {
     clearInterval(ringTimer);
     ringTimer = null;
+  }
+}
+
+export function subscribeRoomOpens(handler: RoomHandler): () => void {
+  roomOpenHandlers.add(handler);
+  ensureInviteChannel();
+  return () => {
+    roomOpenHandlers.delete(handler);
+  };
+}
+
+export function subscribeRoomCloses(handler: RoomCloseHandler): () => void {
+  roomCloseHandlers.add(handler);
+  ensureInviteChannel();
+  return () => {
+    roomCloseHandlers.delete(handler);
+  };
+}
+
+// Keep announcing an open room so anyone who comes online sees the Join button
+export function startRoomAnnounce(row: CallRow): void {
+  roomOpenRow = row;
+  const tick = () => {
+    if (!roomOpenRow) return;
+    try {
+      const ch = ensureInviteChannel();
+      void inviteReady.then(() => {
+        ch.send({ type: "broadcast", event: "room_open", payload: roomOpenRow });
+      });
+    } catch {}
+  };
+  tick();
+  if (roomTimer) clearInterval(roomTimer);
+  roomTimer = setInterval(tick, 3000);
+}
+
+// announceClosed=true only when the room is truly gone (last member left / ended)
+export function stopRoomAnnounce(callId?: string, announceClosed = true): void {
+  const id = callId ?? roomOpenRow?.id ?? null;
+  if (callId && roomOpenRow && roomOpenRow.id !== callId) return;
+  roomOpenRow = null;
+  if (roomTimer) {
+    clearInterval(roomTimer);
+    roomTimer = null;
+  }
+  if (announceClosed && id) {
+    try {
+      const ch = ensureInviteChannel();
+      ch.send({ type: "broadcast", event: "room_closed", payload: { callId: id } });
+    } catch {}
   }
 }
 

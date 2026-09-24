@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import {
   Mic,
   MicOff,
@@ -125,7 +126,11 @@ export function CallPanel({
           <div className="mt-8 flex justify-center gap-6">
             <button
               type="button"
-              onClick={() => void call.decline()}
+              onClick={() => {
+                void call.decline().catch(() => {
+                  toast.error("Could not decline the call");
+                });
+              }}
               className="grid h-14 w-14 place-items-center rounded-full bg-destructive text-destructive-foreground shadow-lg transition hover:scale-105 active:scale-95"
               aria-label="Decline"
             >
@@ -133,7 +138,13 @@ export function CallPanel({
             </button>
             <button
               type="button"
-              onClick={() => void call.accept()}
+              onClick={() => {
+                void call.accept().catch((err: unknown) => {
+                  toast.error(
+                    err instanceof Error && err.message ? err.message : "Could not join the call"
+                  );
+                });
+              }}
               className="gradient-romance grid h-14 w-14 place-items-center rounded-full text-primary-foreground shadow-lg ring-4 ring-primary/30 transition hover:scale-105 active:scale-95 animate-pulse"
               aria-label="Accept"
             >
@@ -190,7 +201,9 @@ export function CallPanel({
 
       <button
         type="button"
-        onClick={() => void call.hangup()}
+        onClick={() => {
+          void call.hangup().catch(() => toast.error("Could not leave the call"));
+        }}
         aria-label="Leave call"
         className="grid h-12 w-12 place-items-center rounded-full bg-destructive text-destructive-foreground shadow-xl transition hover:opacity-90 active:scale-95"
       >
@@ -260,7 +273,9 @@ export function CallPanel({
           )}
           <button
             type="button"
-            onClick={() => void call.hangup()}
+            onClick={() => {
+              void call.hangup().catch(() => toast.error("Could not leave the call"));
+            }}
             className="grid h-9 w-9 place-items-center rounded-full bg-destructive text-white shadow"
           >
             <PhoneOff className="h-4 w-4" />

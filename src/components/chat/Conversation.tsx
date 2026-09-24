@@ -7,8 +7,10 @@ import { Composer, type OutgoingMessage } from "./Composer";
 import { MediaBubble } from "./MediaBubble";
 import { supabase } from "@/integrations/supabase/client";
 import { kindOf, uploadMedia } from "@/lib/media";
+import { pushNotify } from "@/lib/push";
 import { notify, playMessageSound } from "@/lib/sounds";
 import type { Message, Profile } from "@/lib/social";
+import { Phone, PhoneIncoming, PhoneMissed, PhoneOff } from "lucide-react";
 
 function localKey(peerId: string | null) {
   return `zyraxon-messages-${peerId ?? "group"}`;
@@ -63,7 +65,9 @@ export function Conversation({
 
   const belongsHere = useCallback(
     (m: Message) =>
-      peerId
+      m.kind === "push_sub"
+        ? false
+        : peerId
         ? (m.sender_id === me && m.recipient_id === peerId) ||
           (m.sender_id === peerId && m.recipient_id === me)
         : m.recipient_id === null,
@@ -96,7 +100,9 @@ export function Conversation({
           )
         : query.is("recipient_id", null);
       const { data } = await query;
-      if (alive && data) setMessages(data as Message[]);
+      if (alive && data) {
+        setMessages((data as Message[]).filter((m) => m.kind !== "push_sub"));
+      }
     })();
     return () => {
       alive = false;
@@ -141,7 +147,9 @@ export function Conversation({
           setMessages((prev) => prev.filter((m) => m.id !== old.id));
           return;
         }
-        handleIncoming(payload.new as Message);
+        const next = payload.new as Message;
+        if (next.kind === "push_sub") return;
+        handleIncoming(next);
       })
       .on("broadcast", { event: "guest_message" }, ({ payload }) => {
         handleIncoming(payload as Message);
@@ -261,6 +269,10 @@ export function Conversation({
           });
         }
         playMessageSound();
+        if (peerId && msg.kind === "text") {
+          const fromName = profileMap[me]?.display_name ?? "Whisperwind";
+          void pushNotify(peerId, fromName, msg.body, `msg-${me}`);
+        }
       } catch (err) {
         toast.error(
           err instanceof Error && err.message
@@ -357,6 +369,19 @@ export function Conversation({
                         <X className="h-4 w-4" />
                       </button>
                     </div>
+                  ) : m.kind === "call" ? (
+                    <div className="flex items-center gap-2 py-0.5 text-sm text-muted-foreground">
+                      {/missed/i.test(m.body ?? "") ? (
+                        <PhoneMissed className="h-4 w-4 shrink-0 text-red-400" />
+                      ) : /call ·/i.test(m.body ?? "") ? (
+                        <PhoneOff className="h-4 w-4 shrink-0 text-emerald-400" />
+                      ) : /started/i.test(m.body ?? "") ? (
+                        <PhoneIncoming className="h-4 w-4 shrink-0 text-primary" />
+                      ) : (
+                        <Phone className="h-4 w-4 shrink-0 text-primary" />
+                      )}
+                      <span className="whitespace-pre-wrap break-words">{m.body}</span>
+                    </div>
                   ) : m.kind === "text" ? (
                     <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
                   ) : (
@@ -364,7 +389,7 @@ export function Conversation({
                   )}
 
                   <div className="mt-1 flex items-center justify-end gap-2">
-                    {m.mine && editingId !== m.id && (
+                    {m.mine && editingId !== m.id && m.kind !== "call" && (
                       <>
                         {m.kind === "text" && (
                           <button

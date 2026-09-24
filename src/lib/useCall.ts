@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 import {
+  type CallInvite,
   type CallRow,
   broadcastInviteCancel,
   countJoinedMembers,
@@ -12,10 +13,15 @@ import {
   getJoinedPeers,
   setCallActive,
   setMemberState,
+  startRoomAnnounce,
   stopInviteRing,
+  stopRoomAnnounce,
   subscribeCallInvites,
   subscribeInviteCancels,
+  subscribeRoomCloses,
+  subscribeRoomOpens,
 } from "@/lib/calls";
+import { pushNotify } from "@/lib/push";
 
 const ICE: RTCConfiguration = {
   iceServers: [
@@ -97,6 +103,10 @@ export function useCall(userId: string | null) {
   const userIdRef = useRef<string | null>(userId);
   const callIdRef = useRef<string | null>(null);
   const incomingRef = useRef<IncomingCall | null>(null);
+  const callStartedAtRef = useRef<number | null>(null);
+  const withVideoRef = useRef(false);
+  const peerIdRef = useRef<string | null>(null);
+  const lastCallRowRef = useRef<CallRow | null>(null);
 
   const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteRef = useRef<Map<string, MediaStream>>(new Map());
@@ -118,6 +128,54 @@ export function useCall(userId: string | null) {
   useEffect(() => {
     incomingRef.current = incoming;
   }, [incoming]);
+  useEffect(() => {
+    withVideoRef.current = withVideo;
+  }, [withVideo]);
+
+  // Call events go into messages table → show up in chat like normal messages
+  const logCallEvent = useCallback(async (body: string, recipient: string | null) => {
+    const me = userIdRef.current;
+    if (!me) return;
+    try {
+      const { data, error } = await supabase
+        .from("messages")
+        .insert({
+          sender_id: me,
+          recipient_id: recipient,
+          kind: "call",
+          body,
+        })
+        .select()
+        .single();
+      if (error || !data) return;
+      // Instant mirror into the open thread so peer sees it without waiting on postgres_changes
+      const chName = recipient
+        ? `zyraxon-thread-${[me, recipient].sort().join("-")}`
+        : "zyraxon-thread-group";
+      const ch = supabase.channel(chName);
+      ch.subscribe((st) => {
+        if (st === "SUBSCRIBED") {
+          ch.send({ type: "broadcast", event: "message", payload: data });
+          supabase.removeChannel(ch);
+        }
+      });
+      // Web Push when peer's Chrome is closed
+      const name = "Whisperwind";
+      void pushNotify(recipient, name, body, `call-${me}`);
+    } catch {}
+  }, []);
+
+  const logCallEnd = useCallback(
+    (_callId: string, startedAt: number | null, video: boolean) => {
+      if (!startedAt) return;
+      const secs = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      const mm = Math.floor(secs / 60);
+      const ss = secs % 60;
+      const dur = mm > 0 ? `${mm}m ${ss}s` : `${ss}s`;
+      void logCallEvent(`${video ? "Video" : "Audio"} call · ${dur}`, peerIdRef.current);
+    },
+    [logCallEvent]
+  );
 
   const publishRemotes = useCallback(() => {
     const obj: Record<string, MediaStream> = {};
@@ -314,7 +372,8 @@ export function useCall(userId: string | null) {
     micTrackRef.current = null;
     if (endedId) {
       stopInviteRing(endedId);
-      if (userIdRef.current) broadcastInviteCancel(endedId, userIdRef.current);
+      // Only stop our own room announce — do NOT close the room for others still inside
+      stopRoomAnnounce(endedId, false);
     }
     callIdRef.current = null;
     remoteRef.current.clear();
@@ -359,7 +418,11 @@ export function useCall(userId: string | null) {
 
       ch.on("broadcast", { event: "call_ended" }, ({ payload }) => {
         const p = payload as { callId?: string; from?: string };
-        if (p.callId === callIdRef.current && p.from !== userIdRef.current) localCleanup();
+        if (p.callId === callIdRef.current && p.from !== userIdRef.current) {
+          const ended = p.callId;
+          localCleanup();
+          if (ended && userIdRef.current) broadcastInviteCancel(ended, userIdRef.current);
+        }
       });
 
       // Presence: discover peers even when call_members table is missing
@@ -403,8 +466,11 @@ export function useCall(userId: string | null) {
       if (!rows) return; // network/RLS error — never kick an active call on fetch failure
       const openIds = new Set(rows.map((r) => r.call.id));
 
-      if (callIdRef.current && !openIds.has(callIdRef.current) && silentLeave) {
+      // Missing table → rows=[] — must NOT kick active call or clear broadcast incoming
+      if (rows.length && callIdRef.current && !openIds.has(callIdRef.current) && silentLeave) {
+        const gone = callIdRef.current;
         localCleanup();
+        if (userId) broadcastInviteCancel(gone, userId);
         return;
       }
 
@@ -415,8 +481,9 @@ export function useCall(userId: string | null) {
           r.call.id !== callIdRef.current
       );
       const joinable = rows.filter((r) => r.call.id !== callIdRef.current).map((r) => r.call);
-      setJoinableCalls(joinable);
+      if (joinable.length) setJoinableCalls(joinable);
 
+      // Broadcast invite owns incoming state — DB must never clear it
       if (inv && statusRef.current === "idle") {
         setIncoming({
           callId: inv.call.id,
@@ -427,12 +494,6 @@ export function useCall(userId: string | null) {
         setIncomingVideo(inv.call.with_video);
         setCallerRingtone(inv.call.ringtone);
         setStatus("incoming");
-        return;
-      }
-      if (!inv && statusRef.current === "incoming") {
-        setIncoming(null);
-        setIncomingVideo(false);
-        setStatus("idle");
       }
     },
     [localCleanup, userId]
@@ -453,17 +514,34 @@ export function useCall(userId: string | null) {
       .on("postgres_changes", { event: "*", schema: "public", table: "calls" }, refresh)
       .subscribe();
 
-    const handleInvite = (inv: {
-      to?: string;
-      callId: string;
-      callerId: string;
-      withVideo: boolean;
-      ringtone: string;
-    }) => {
+    const handleInvite = (inv: CallInvite) => {
       if (inv.to && inv.to !== userId) return;
       if (inv.callerId === userId) return;
       if (inv.callId === callIdRef.current) return;
+
+      // Keep Join button alive even when DB table is missing
+      setJoinableCalls((prev) => {
+        if (prev.some((c) => c.id === inv.callId)) {
+          return prev.map((c) => (c.id === inv.callId ? { ...c, with_video: inv.withVideo } : c));
+        }
+        return [
+          ...prev,
+          {
+            id: inv.callId,
+            kind: inv.kind,
+            peer_id: inv.peerId,
+            created_by: inv.callerId,
+            with_video: inv.withVideo,
+            ringtone: inv.ringtone,
+            status: "active",
+            created_at: new Date().toISOString(),
+            ended_at: null,
+          } satisfies CallRow,
+        ];
+      });
+
       if (statusRef.current === "calling" || statusRef.current === "connected") return;
+      if (statusRef.current === "incoming" && incomingRef.current?.callId === inv.callId) return;
       setIncoming({
         callId: inv.callId,
         callerId: inv.callerId,
@@ -476,7 +554,22 @@ export function useCall(userId: string | null) {
     };
 
     const handleCancel = (c: { callId: string }) => {
+      setJoinableCalls((prev) => prev.filter((row) => row.id !== c.callId));
       if (incomingRef.current?.callId === c.callId) {
+        setIncoming(null);
+        setIncomingVideo(false);
+        if (statusRef.current === "incoming") setStatus("idle");
+      }
+    };
+
+    const handleRoomOpen = (row: CallRow) => {
+      if (!row?.id || row.id === callIdRef.current || row.created_by === userId) return;
+      setJoinableCalls((prev) => (prev.some((c) => c.id === row.id) ? prev : [...prev, row]));
+    };
+
+    const handleRoomClose = (p: { callId: string }) => {
+      setJoinableCalls((prev) => prev.filter((c) => c.id !== p.callId));
+      if (incomingRef.current?.callId === p.callId) {
         setIncoming(null);
         setIncomingVideo(false);
         if (statusRef.current === "incoming") setStatus("idle");
@@ -485,12 +578,16 @@ export function useCall(userId: string | null) {
 
     const offInvite = subscribeCallInvites(handleInvite);
     const offCancel = subscribeInviteCancels(handleCancel);
+    const offRoomOpen = subscribeRoomOpens(handleRoomOpen);
+    const offRoomClose = subscribeRoomCloses(handleRoomClose);
     const offInbox = ensurePersonalInviteInbox(userId, handleInvite, handleCancel);
 
     void loadOpenCalls(true);
     return () => {
       offInvite();
       offCancel();
+      offRoomOpen();
+      offRoomClose();
       offInbox();
       supabase.removeChannel(ch);
     };
@@ -528,6 +625,8 @@ export function useCall(userId: string | null) {
         callIdRef.current = callId;
         setCurrentCallId(callId);
         setWithVideo(video);
+        withVideoRef.current = video;
+        callStartedAtRef.current = Date.now();
         setIncoming(null);
         setIncomingVideo(false);
         setStatus("calling");
@@ -538,6 +637,23 @@ export function useCall(userId: string | null) {
         await setMemberState(callId, userId, "joined");
         await joinChannel(callId);
         await setCallActive(callId);
+        void logCallEvent(`${video ? "Video" : "Audio"} call started`, peerIdRef.current);
+
+        const announceRow: CallRow =
+          lastCallRowRef.current?.id === callId
+            ? lastCallRowRef.current
+            : {
+                id: callId,
+                kind: "dm",
+                peer_id: peerIdRef.current,
+                created_by: userId,
+                with_video: video,
+                ringtone: "",
+                status: "active",
+                created_at: new Date().toISOString(),
+                ended_at: null,
+              };
+        startRoomAnnounce(announceRow);
 
         // New joiner rule: offer to every existing member (DB) + presence covers fallback
         try {
@@ -549,7 +665,7 @@ export function useCall(userId: string | null) {
         enteringRef.current = false;
       }
     },
-    [createPeer, joinChannel, localCleanup, userId]
+    [createPeer, joinChannel, localCleanup, logCallEvent, userId]
   );
 
   const startDmCall = useCallback(
@@ -558,6 +674,7 @@ export function useCall(userId: string | null) {
       if (statusRef.current !== "idle") {
         throw new Error("You are already in a call. Hang up first.");
       }
+      peerIdRef.current = peerId;
       const call = await createCall({
         createdBy: userId,
         kind: "dm",
@@ -566,6 +683,7 @@ export function useCall(userId: string | null) {
         withVideo: video,
       });
       if (!call) throw new Error("Could not create the call room — server error. Please try again.");
+      lastCallRowRef.current = call;
       await enterCall(call.id, video);
     },
     [enterCall, userId]
@@ -580,6 +698,7 @@ export function useCall(userId: string | null) {
       if (!inviteeIds.length) {
         throw new Error("Add at least one friend before starting a group call.");
       }
+      peerIdRef.current = null;
       const call = await createCall({
         createdBy: userId,
         kind: "group",
@@ -588,46 +707,70 @@ export function useCall(userId: string | null) {
         withVideo: video,
       });
       if (!call) throw new Error("Could not create the call room — server error. Please try again.");
+      lastCallRowRef.current = call;
       await enterCall(call.id, video);
     },
     [enterCall, userId]
   );
 
   const accept = useCallback(() => {
-    if (!incoming) return;
+    if (!incoming) return Promise.resolve();
+    peerIdRef.current = incoming.callerId;
     return enterCall(incoming.callId, incoming.withVideo);
   }, [enterCall, incoming]);
 
   const decline = useCallback(async () => {
     if (!userId || !incoming) return;
     const id = incoming.callId;
-    await setMemberState(id, userId, "declined");
-    stopInviteRing(id);
+    try {
+      await setMemberState(id, userId, "declined");
+    } catch {}
+    peerIdRef.current = incoming.callerId;
+    void logCallEvent("Missed call", incoming.callerId);
+    try {
+      stopInviteRing(id);
+    } catch {}
     setIncoming(null);
     setIncomingVideo(false);
     setStatus("idle");
     void loadOpenCalls(true);
-  }, [incoming, loadOpenCalls, userId]);
+  }, [incoming, loadOpenCalls, logCallEvent, userId]);
 
   const joinCall = useCallback(
     async (callId: string) => {
       const row = joinableCalls.find((c) => c.id === callId);
-      if (!row) return;
-      await enterCall(callId, row.with_video);
+      lastCallRowRef.current = row ?? null;
+      if (row) peerIdRef.current = row.created_by === userId ? row.peer_id : row.created_by;
+      await enterCall(callId, row?.with_video ?? false);
     },
-    [enterCall, joinableCalls]
+    [enterCall, joinableCalls, userId]
   );
 
+  // Hangup leaves YOUR seat only — room stays open so others/you can Join later
   const hangup = useCallback(async () => {
     const me = userIdRef.current;
     const callId = callIdRef.current;
+    const startedAt = callStartedAtRef.current;
     if (me && callId) {
-      await setMemberState(callId, me, "left");
-      if ((await countJoinedMembers(callId)) === 0) await endCallRoom(callId);
+      try {
+        await setMemberState(callId, me, "left");
+      } catch {}
+      try {
+        const n = await countJoinedMembers(callId);
+        if (n === 0) {
+          await endCallRoom(callId);
+          try {
+            stopInviteRing(callId);
+            stopRoomAnnounce(callId, true);
+            broadcastInviteCancel(callId, me);
+          } catch {}
+        }
+      } catch {}
+      void logCallEnd(callId, startedAt, withVideoRef.current);
     }
     localCleanup();
     void loadOpenCalls(true);
-  }, [loadOpenCalls, localCleanup]);
+  }, [loadOpenCalls, localCleanup, logCallEnd]);
 
   const toggleMic = useCallback(() => {
     if (!micTrackRef.current) return;
