@@ -19,11 +19,13 @@ export function Conversation({
   peerId,
   profiles,
   onOpenProfile,
+  active = true,
 }: {
   me: string;
   peerId: string | null;
   profiles: Record<string, Profile> | Profile[];
   onOpenProfile: (id: string) => void;
+  active?: boolean;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [sending, setSending] = useState(false);
@@ -168,8 +170,10 @@ export function Conversation({
   }, [messages, peerId, me]);
 
   useEffect(() => {
+    // শুধু দৃশ্যমান (active) কনভার্সেশনে অটো-স্ক্রল — hidden সবগুলোতে লাগালে lag হয়
+    if (!active) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length, isPeerTyping]);
+  }, [messages.length, isPeerTyping, active]);
 
   // টাইপিং থ্রটলিং
   const notifyTyping = useCallback(() => {

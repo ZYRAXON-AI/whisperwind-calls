@@ -2,6 +2,8 @@
 let ctx: AudioContext | null = null;
 let ringTimer: ReturnType<typeof setInterval> | null = null;
 let previewTimer: ReturnType<typeof setTimeout> | null = null;
+// ইউটিউব রিংটোন (yt:VIDEOID) বাজানোর জন্য hidden audio iframe
+const ytFrames = new Set<HTMLIFrameElement>();
 
 function audio(): AudioContext | null {
   if (typeof window === "undefined") return null;
@@ -139,10 +141,40 @@ export function setSavedRingtone(id: string) {
   localStorage.setItem(STORAGE_KEY, id);
 }
 
-// যে রিংটোন কলকারী পাঠাবে সেটি বাজাবে
+// ইউটিউব রিংটোন (yt:VIDEOID) বাজানো — autoplay + loop করা hidden iframe
+function playYoutubeRingtone(videoId: string) {
+  if (typeof document === "undefined") return;
+  stopYoutubeRingtone();
+  const iframe = document.createElement("iframe");
+  iframe.style.cssText = "position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;left:0;bottom:0;border:none;";
+  iframe.src = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&loop=1&playlist=${videoId}&controls=0&disablekb=1&playsinline=1`;
+  iframe.allow = "autoplay";
+  iframe.title = "ringtone";
+  document.body.appendChild(iframe);
+  ytFrames.add(iframe);
+}
+
+function stopYoutubeRingtone() {
+  ytFrames.forEach((f) => {
+    try {
+      f.remove();
+    } catch {}
+  });
+  ytFrames.clear();
+}
+
+// যে রিংটোন কলকারী পাঠাবে সেটি বাজাবে (preset বা yt:VIDEOID)
 export function startRingtone(presetId?: string) {
   if (ringTimer) return;
-  const tune = RINGTONE_PRESETS.find((p) => p.id === (presetId || getSavedRingtone())) || RINGTONE_PRESETS[0];
+  const id = presetId || getSavedRingtone();
+
+  // ইউটিউব রিংটোন
+  if (id.startsWith("yt:")) {
+    playYoutubeRingtone(id.slice(3));
+    return;
+  }
+
+  const tune = RINGTONE_PRESETS.find((p) => p.id === id) || RINGTONE_PRESETS[0];
 
   tune.play();
   ringTimer = setInterval(() => {
@@ -155,10 +187,18 @@ export function stopRingtone() {
   ringTimer = null;
   if (previewTimer) clearTimeout(previewTimer);
   previewTimer = null;
+  stopYoutubeRingtone();
 }
 
 export function previewRingtone(presetId: string) {
   stopRingtone();
+  if (presetId.startsWith("yt:")) {
+    playYoutubeRingtone(presetId.slice(3));
+    previewTimer = setTimeout(() => {
+      stopRingtone();
+    }, 1700);
+    return;
+  }
   const tune = RINGTONE_PRESETS.find((p) => p.id === presetId) || RINGTONE_PRESETS[0];
   tune.play();
   previewTimer = setTimeout(() => {

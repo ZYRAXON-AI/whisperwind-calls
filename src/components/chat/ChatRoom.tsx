@@ -227,7 +227,7 @@ export function ChatRoom({
       : "Zyraxon AI Space";
 
   return (
-    <div className="relative flex h-screen w-screen overflow-hidden p-0 sm:p-3">
+    <div className="relative flex h-dvh w-full overflow-hidden p-0 sm:p-3">
       {/* Mobile Sidebar Overlay */}
       {navOpen && (
         <div
@@ -436,19 +436,23 @@ export function ChatRoom({
           </button>
         </header>
 
-        {/* Content views */}
+        {/* Content views — সবসময় alive (keep-alive)।
+            Tab বদলালে কোনো view unmount হয় না, তাই loading নেয় না
+            আর YouTube/সাউন্ড বাজতে থাকে। শুধু hidden class toggle হয়। */}
         <div className="relative min-h-0 flex-1 overflow-hidden">
-          {(view.type === "group" || view.type === "dm") && (
+          <div
+            className={view.type === "group" || view.type === "dm" ? "h-full" : "pointer-events-none hidden"}
+          >
             <Conversation
-              key={view.type === "dm" ? view.peerId : "group"}
               me={user.id}
               peerId={view.type === "dm" ? view.peerId : null}
               profiles={profiles}
+              active={view.type === "group" || view.type === "dm"}
               onOpenProfile={(id) => go({ type: "profile", userId: id })}
             />
-          )}
+          </div>
 
-          {view.type === "friends" && (
+          <div className={view.type === "friends" ? "h-full" : "pointer-events-none hidden"}>
             <FriendsPanel
               me={user.id}
               profiles={profiles}
@@ -458,9 +462,9 @@ export function ChatRoom({
               onOpenDm={(peerId) => go({ type: "dm", peerId })}
               onOpenProfile={(userId) => go({ type: "profile", userId })}
             />
-          )}
+          </div>
 
-          {view.type === "requests" && (
+          <div className={view.type === "requests" ? "h-full" : "pointer-events-none hidden"}>
             <div className="scroll-soft mx-auto h-full max-w-xl overflow-y-auto p-4">
               <h2 className="mb-4 text-lg font-semibold">Friend requests</h2>
               {requests.length === 0 ? (
@@ -506,11 +510,13 @@ export function ChatRoom({
                 </div>
               )}
             </div>
-          )}
+          </div>
 
-          {view.type === "youtube" && <YouTubePanel />}
+          <div className={view.type === "youtube" ? "h-full" : "pointer-events-none hidden"}>
+            <YouTubePanel onOpenMenu={() => setNavOpen(true)} />
+          </div>
 
-          {view.type === "profile" && (
+          <div className={view.type === "profile" ? "h-full" : "pointer-events-none hidden"}>
             <ProfilePage
               userId={view.userId}
               meId={user.id}
@@ -522,7 +528,7 @@ export function ChatRoom({
               onBack={() => go({ type: "group" })}
               onOpenEdit={() => setProfileOpen(true)}
             />
-          )}
+          </div>
         </div>
       </div>
 

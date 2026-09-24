@@ -79,6 +79,23 @@ export function useCall(userId: string | null) {
     pc.addTransceiver("audio", { direction: "sendrecv" });
     pc.addTransceiver("video", { direction: "sendrecv" });
 
+    // replaceTrack (সিএম শেয়ার) পরে নতুন offer/createAnswer চক্র দরকার
+    // শুধু established call-এ (setRemoteDescription done) করবো — setup/answer stage এ নয়
+    let makingOffer = false;
+    pc.onnegotiationneeded = async () => {
+      try {
+        if (makingOffer) return;
+        if (statusRef.current !== "connected" || !pc.remoteDescription) return;
+        makingOffer = true;
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        if (userId) send("call_renegotiate", { from: userId, sdp: offer });
+      } catch {
+      } finally {
+        makingOffer = false;
+      }
+    };
+
     pc.ontrack = (e) => {
       if (e.streams[0]) {
         e.streams[0].getTracks().forEach((track) => remote.addTrack(track));
@@ -156,6 +173,32 @@ export function useCall(userId: string | null) {
       if (payload.from !== userId) {
         setPeerSharingScreen(Boolean(payload.sharing));
       }
+    });
+
+    // screen share replaceTrack-এর পরে renegotiation (সিএম শেয়ার কালো দেখার ফিক্স)
+    ch.on("broadcast", { event: "call_renegotiate" }, async ({ payload }) => {
+      if (payload.from === userId) return;
+      const pc = pcRef.current;
+      if (!pc || !payload.sdp) return;
+      try {
+        await pc.setRemoteDescription(
+          new RTCSessionDescription(payload.sdp as RTCSessionDescriptionInit)
+        );
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        if (userId) send("call_renegotiate_answer", { from: userId, sdp: answer });
+      } catch {}
+    });
+
+    ch.on("broadcast", { event: "call_renegotiate_answer" }, async ({ payload }) => {
+      if (payload.from === userId) return;
+      const pc = pcRef.current;
+      if (!pc || !payload.sdp) return;
+      try {
+        await pc.setRemoteDescription(
+          new RTCSessionDescription(payload.sdp as RTCSessionDescriptionInit)
+        );
+      } catch {}
     });
 
     ch.subscribe();
