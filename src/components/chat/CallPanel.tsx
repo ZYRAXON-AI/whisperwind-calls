@@ -41,13 +41,38 @@ function RemoteAudio({ stream }: { stream: MediaStream | null | undefined }) {
   const ref = useRef<HTMLAudioElement>(null);
   useEffect(() => {
     const el = ref.current;
-    if (!el) return;
-    el.srcObject = stream ?? null;
-    el.autoplay = true;
-    if (stream) void el.play().catch(() => undefined);
+    if (!el || !stream) return;
+    let n = 0;
+    const kick = () => {
+      el.muted = false;
+      el.volume = 1;
+      if (el.srcObject !== stream) el.srcObject = stream;
+      for (const t of stream.getAudioTracks()) {
+        try {
+          t.enabled = true;
+        } catch {}
+      }
+      void el.play().catch(() => undefined);
+    };
+    kick();
+    const onAdd = () => kick();
+    stream.addEventListener("addtrack", onAdd);
+    // Autoplay can be blocked until a gesture — keep retrying briefly
+    const timer = window.setInterval(() => {
+      kick();
+      n += 1;
+      if (n >= 15) window.clearInterval(timer);
+    }, 800);
+    const onGesture = () => kick();
+    document.addEventListener("pointerdown", onGesture, { once: true });
+    return () => {
+      stream.removeEventListener("addtrack", onAdd);
+      window.clearInterval(timer);
+      document.removeEventListener("pointerdown", onGesture);
+    };
   }, [stream]);
   if (!stream) return null;
-  return <audio ref={ref} autoPlay playsInline />;
+  return <audio ref={ref} autoPlay playsInline muted={false} />;
 }
 
 function hasVideoTrack(stream: MediaStream | null | undefined) {
@@ -124,10 +149,11 @@ export function CallPanel({
 
   if (call.status === "idle") return null;
 
-  // Always pump remote audio — video tiles already play sound, audio-only needs this
-  const remoteAudioNodes = remoteIds.map((id) => (
-    <RemoteAudio key={`audio-${id}`} stream={call.remoteStreams[id]} />
-  ));
+  // Audio-only remotes have no <video> to play sound — pump them on <audio>
+  // (video tiles already play their own audio; don't double up)
+  const remoteAudioNodes = remoteIds
+    .filter((id) => !hasVideoTrack(call.remoteStreams[id]))
+    .map((id) => <RemoteAudio key={`audio-${id}`} stream={call.remoteStreams[id]} />);
 
   // Incoming Call Dialog
   if (call.status === "incoming") {

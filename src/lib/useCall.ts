@@ -318,16 +318,17 @@ export function useCall(userId: string | null) {
       pc.ontrack = (e) => {
         const stream = remoteRef.current.get(peerId) ?? new MediaStream();
         remoteRef.current.set(peerId, stream);
-        if (e.streams[0]) {
-          e.streams[0].getTracks().forEach((track) => {
-            if (!stream.getTracks().some((x) => x.id === track.id)) stream.addTrack(track);
-          });
-        } else if (e.track) {
-          stream.addTrack(e.track);
-        }
-        e.track?.addEventListener("unmute", () => {
-          publishRemotes();
-        });
+        const add = (t: MediaStreamTrack) => {
+          if (!stream.getTracks().some((x) => x.id === t.id)) stream.addTrack(t);
+          try {
+            t.enabled = true;
+          } catch {}
+        };
+        // Always attach e.track — streams[0] can fire empty on some browsers
+        if (e.track) add(e.track);
+        e.streams[0]?.getTracks().forEach(add);
+        e.track?.addEventListener("unmute", () => publishRemotes());
+        e.track?.addEventListener("mute", () => publishRemotes());
         publishRemotes();
         setStatus((s) => (s === "calling" || s === "incoming" ? "connected" : s));
       };
@@ -458,19 +459,39 @@ export function useCall(userId: string | null) {
           if (local) {
             const a = local.getAudioTracks()[0];
             const v = screenRef.current?.getVideoTracks()[0] ?? local.getVideoTracks()[0];
+            let audioTx = pc.getTransceivers().find((t) => t.receiver.track?.kind === "audio");
+            let videoTx = pc.getTransceivers().find((t) => t.receiver.track?.kind === "video");
+            if (a && !audioTx) {
+              try {
+                pc.addTrack(a, local);
+                audioTx = pc.getTransceivers().find((t) => t.receiver.track?.kind === "audio");
+              } catch {}
+            }
+            if (v && !videoTx) {
+              try {
+                pc.addTrack(v, local);
+                videoTx = pc.getTransceivers().find((t) => t.receiver.track?.kind === "video");
+              } catch {}
+            }
+            if (a && audioTx) {
+              try {
+                await audioTx.sender.replaceTrack(a);
+                audioTx.direction = "sendrecv";
+              } catch {}
+            }
+            if (v && videoTx) {
+              try {
+                await videoTx.sender.replaceTrack(v);
+                videoTx.direction = "sendrecv";
+              } catch {}
+            }
+            // Force sendrecv on every transceiver so our mic actually goes out
             for (const tx of pc.getTransceivers()) {
-              const kind = tx.receiver.track?.kind;
-              if (kind === "audio" && a) {
-                try {
-                  await tx.sender.replaceTrack(a);
-                  tx.direction = "sendrecv";
-                } catch {}
-              } else if (kind === "video" && v) {
-                try {
-                  await tx.sender.replaceTrack(v);
-                  tx.direction = "sendrecv";
-                } catch {}
-              }
+              try {
+                const k = tx.receiver.track?.kind;
+                if (k === "audio" && a) tx.direction = "sendrecv";
+                if (k === "video" && v) tx.direction = "sendrecv";
+              } catch {}
             }
           }
           await drainIce(from);
@@ -837,8 +858,14 @@ export function useCall(userId: string | null) {
         setLocalStream(stream);
         const at = stream.getAudioTracks()[0];
         const vt = stream.getVideoTracks()[0];
-        if (at) micTrackRef.current = at;
-        if (vt) camTrackRef.current = vt;
+        if (at) {
+          at.enabled = true;
+          micTrackRef.current = at;
+        }
+        if (vt) {
+          vt.enabled = true;
+          camTrackRef.current = vt;
+        }
 
         // UI first — never block the call on database round-trips
         callIdRef.current = callId;
