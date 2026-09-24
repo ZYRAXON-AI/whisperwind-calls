@@ -37,13 +37,14 @@ function Unlock() {
   const [username, setUsername] = useState("");
   const [guestPassword, setGuestPassword] = useState("");
 
-  // 1. Permanent secret password unlock
+  // 1. Secret word unlock
   async function onSubmitSecret(e: React.FormEvent) {
     e.preventDefault();
+    if (!password.trim()) return;
     setBusy(true);
     setError(false);
     try {
-      const res = await unlock({ data: { password } });
+      const res = await unlock({ data: { password: password.trim() } });
       if (res.ok) {
         await router.navigate({ to: "/" });
         router.invalidate();
@@ -55,7 +56,7 @@ function Unlock() {
     }
   }
 
-  // 2. Instant account creation without verification
+  // 2. Instant account creation
   async function onSubmitInstantAccount(e: React.FormEvent) {
     e.preventDefault();
     if (!username.trim() || !guestPassword.trim()) {
@@ -67,13 +68,11 @@ function Unlock() {
       const cleanUser = username.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
       const syntheticEmail = `${cleanUser}@guest.local`;
 
-      // Try login first (if account already created earlier)
       let authRes = await supabase.auth.signInWithPassword({
         email: syntheticEmail,
         password: guestPassword,
       });
 
-      // If user does not exist, sign up instantly (no verification needed)
       if (authRes.error) {
         const signUpRes = await supabase.auth.signUp({
           email: syntheticEmail,
@@ -91,9 +90,7 @@ function Unlock() {
         }
       }
 
-      // Unlock gate in session so router lets user in
       await unlockGuest();
-
       toast.success(`Welcome, ${username.trim()}! Logged in without cloud storage.`);
       await router.navigate({ to: "/" });
       router.invalidate();
@@ -129,12 +126,12 @@ function Unlock() {
                   autoComplete="current-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Secret word (zyraxonai)"
+                  placeholder="Enter secret word"
                   className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                 />
               </div>
 
-              {error && <p className="mt-3 text-sm text-destructive">That is not the secret word.</p>}
+              {error && <p className="mt-3 text-sm text-destructive">Incorrect secret word. Try again.</p>}
 
               <button
                 type="submit"
@@ -142,7 +139,7 @@ function Unlock() {
                 className="gradient-romance mt-6 inline-flex w-full items-center justify-center gap-2 rounded-2xl px-5 py-3 text-sm font-semibold text-primary-foreground transition hover:opacity-90 disabled:opacity-50"
               >
                 {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-                Enter with Password
+                Enter Space
               </button>
             </form>
 
@@ -163,7 +160,7 @@ function Unlock() {
         ) : (
           <>
             <p className="mt-2 text-sm text-muted-foreground text-balance-tight">
-              Create an instant account or log in with your username and password. No verification required!
+              Create an instant account or log in with your username and password.
             </p>
 
             <form onSubmit={onSubmitInstantAccount} className="mt-6 flex flex-col gap-3">
@@ -213,4 +210,3 @@ function Unlock() {
     </div>
   );
 }
-
