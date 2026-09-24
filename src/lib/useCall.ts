@@ -5,12 +5,14 @@ import {
   type CallInvite,
   type CallRow,
   broadcastInviteCancel,
+  broadcastInviteDeclined,
   countJoinedMembers,
   createCall,
   endCallRoom,
   ensurePersonalInviteInbox,
   fetchMyOpenCalls,
   getJoinedPeers,
+  isInviteDeclined,
   setCallActive,
   setMemberState,
   startRoomAnnounce,
@@ -18,10 +20,12 @@ import {
   stopRoomAnnounce,
   subscribeCallInvites,
   subscribeInviteCancels,
+  subscribeInviteDeclines,
   subscribeRoomCloses,
   subscribeRoomOpens,
 } from "@/lib/calls";
 import { pushNotify } from "@/lib/push";
+import { stopRingtone } from "@/lib/sounds";
 
 const ICE: RTCConfiguration = {
   iceServers: [
@@ -107,6 +111,7 @@ export function useCall(userId: string | null) {
   const withVideoRef = useRef(false);
   const peerIdRef = useRef<string | null>(null);
   const lastCallRowRef = useRef<CallRow | null>(null);
+  const declinedCallIdsRef = useRef<Set<string>>(new Set());
 
   const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteRef = useRef<Map<string, MediaStream>>(new Map());
@@ -483,8 +488,9 @@ export function useCall(userId: string | null) {
       const joinable = rows.filter((r) => r.call.id !== callIdRef.current).map((r) => r.call);
       if (joinable.length) setJoinableCalls(joinable);
 
-      // Broadcast invite owns incoming state — DB must never clear it
+      // Broadcast invite owns incoming state — DB must never clear it or reopen declined
       if (inv && statusRef.current === "idle") {
+        if (declinedCallIdsRef.current.has(inv.call.id)) return;
         setIncoming({
           callId: inv.call.id,
           callerId: inv.call.created_by,
@@ -518,6 +524,9 @@ export function useCall(userId: string | null) {
       if (inv.to && inv.to !== userId) return;
       if (inv.callerId === userId) return;
       if (inv.callId === callIdRef.current) return;
+      // This user already pressed Decline on this call — never reopen the dialog
+      if (declinedCallIdsRef.current.has(inv.callId)) return;
+      if (isInviteDeclined(inv.callId, userId)) return;
 
       // Keep Join button alive even when DB table is missing
       setJoinableCalls((prev) => {
@@ -542,6 +551,8 @@ export function useCall(userId: string | null) {
 
       if (statusRef.current === "calling" || statusRef.current === "connected") return;
       if (statusRef.current === "incoming" && incomingRef.current?.callId === inv.callId) return;
+      // Already showing a different incoming call — don't thrash the UI
+      if (statusRef.current === "incoming" && incomingRef.current) return;
       setIncoming({
         callId: inv.callId,
         callerId: inv.callerId,
@@ -556,10 +567,15 @@ export function useCall(userId: string | null) {
     const handleCancel = (c: { callId: string }) => {
       setJoinableCalls((prev) => prev.filter((row) => row.id !== c.callId));
       if (incomingRef.current?.callId === c.callId) {
+        stopRingtone();
         setIncoming(null);
         setIncomingVideo(false);
         if (statusRef.current === "incoming") setStatus("idle");
       }
+    };
+
+    const handleDeclined = () => {
+      // We are the caller — someone declined; nothing to reopen on our side
     };
 
     const handleRoomOpen = (row: CallRow) => {
@@ -570,6 +586,7 @@ export function useCall(userId: string | null) {
     const handleRoomClose = (p: { callId: string }) => {
       setJoinableCalls((prev) => prev.filter((c) => c.id !== p.callId));
       if (incomingRef.current?.callId === p.callId) {
+        stopRingtone();
         setIncoming(null);
         setIncomingVideo(false);
         if (statusRef.current === "incoming") setStatus("idle");
@@ -578,14 +595,16 @@ export function useCall(userId: string | null) {
 
     const offInvite = subscribeCallInvites(handleInvite);
     const offCancel = subscribeInviteCancels(handleCancel);
+    const offDeclined = subscribeInviteDeclines(handleDeclined);
     const offRoomOpen = subscribeRoomOpens(handleRoomOpen);
     const offRoomClose = subscribeRoomCloses(handleRoomClose);
-    const offInbox = ensurePersonalInviteInbox(userId, handleInvite, handleCancel);
+    const offInbox = ensurePersonalInviteInbox(userId, handleInvite, handleCancel, handleDeclined);
 
     void loadOpenCalls(true);
     return () => {
       offInvite();
       offCancel();
+      offDeclined();
       offRoomOpen();
       offRoomClose();
       offInbox();
@@ -602,8 +621,13 @@ export function useCall(userId: string | null) {
       try {
         if (callIdRef.current && callIdRef.current !== callId) {
           const prev = callIdRef.current;
-          await setMemberState(prev, userId, "left");
-          if ((await countJoinedMembers(prev)) === 0) await endCallRoom(prev);
+          void setMemberState(prev, userId, "left")
+            .then(() => countJoinedMembers(prev))
+            .then((n) => {
+              if (n === 0) return endCallRoom(prev);
+              return undefined;
+            })
+            .catch(() => undefined);
           localCleanup();
         }
 
@@ -622,6 +646,7 @@ export function useCall(userId: string | null) {
         if (at) micTrackRef.current = at;
         if (vt) camTrackRef.current = vt;
 
+        // UI first — never block the call on database round-trips
         callIdRef.current = callId;
         setCurrentCallId(callId);
         setWithVideo(video);
@@ -633,10 +658,13 @@ export function useCall(userId: string | null) {
         setSharingScreen(false);
         setPeerSharingScreen(false);
         sharersRef.current.clear();
+        declinedCallIdsRef.current.delete(callId);
 
-        await setMemberState(callId, userId, "joined");
-        await joinChannel(callId);
-        await setCallActive(callId);
+        // Network path starts immediately; DB is best-effort (table may be missing)
+        const joined = joinChannel(callId);
+        void setMemberState(callId, userId, "joined").catch(() => undefined);
+        void setCallActive(callId).catch(() => undefined);
+        await joined;
         void logCallEvent(`${video ? "Video" : "Audio"} call started`, peerIdRef.current);
 
         const announceRow: CallRow =
@@ -655,11 +683,11 @@ export function useCall(userId: string | null) {
               };
         startRoomAnnounce(announceRow);
 
-        // New joiner rule: offer to every existing member (DB) + presence covers fallback
-        try {
-          const peers = await getJoinedPeers(callId, userId);
-          peers.forEach((p) => createPeer(p));
-        } catch {}
+        void getJoinedPeers(callId, userId)
+          .then((peers) => {
+            peers.forEach((p) => createPeer(p));
+          })
+          .catch(() => undefined);
         setJoinableCalls((prev) => prev.filter((c) => c.id !== callId));
       } finally {
         enteringRef.current = false;
@@ -715,24 +743,36 @@ export function useCall(userId: string | null) {
 
   const accept = useCallback(() => {
     if (!incoming) return Promise.resolve();
+    if (enteringRef.current || statusRef.current !== "incoming") return Promise.resolve();
     peerIdRef.current = incoming.callerId;
-    return enterCall(incoming.callId, incoming.withVideo);
+    // Close the dialog + stop ringtone immediately so the button feels instant
+    const id = incoming.callId;
+    setIncoming(null);
+    setIncomingVideo(false);
+    setStatus("calling");
+    stopRingtone();
+    return enterCall(id, incoming.withVideo);
   }, [enterCall, incoming]);
 
   const decline = useCallback(async () => {
     if (!userId || !incoming) return;
     const id = incoming.callId;
-    try {
-      await setMemberState(id, userId, "declined");
-    } catch {}
-    peerIdRef.current = incoming.callerId;
-    void logCallEvent("Missed call", incoming.callerId);
-    try {
-      stopInviteRing(id);
-    } catch {}
+    const caller = incoming.callerId;
+
+    // UI first — never wait on the network (this was hanging the Decline button)
+    declinedCallIdsRef.current.add(id);
     setIncoming(null);
     setIncomingVideo(false);
     setStatus("idle");
+    stopRingtone();
+    try {
+      navigator.vibrate?.(0);
+    } catch {}
+
+    peerIdRef.current = caller;
+    void logCallEvent("Missed call", caller);
+    broadcastInviteDeclined(id, userId, caller);
+    void setMemberState(id, userId, "declined").catch(() => undefined);
     void loadOpenCalls(true);
   }, [incoming, loadOpenCalls, logCallEvent, userId]);
 
@@ -751,21 +791,22 @@ export function useCall(userId: string | null) {
     const me = userIdRef.current;
     const callId = callIdRef.current;
     const startedAt = callStartedAtRef.current;
+    stopRingtone();
     if (me && callId) {
-      try {
-        await setMemberState(callId, me, "left");
-      } catch {}
-      try {
-        const n = await countJoinedMembers(callId);
-        if (n === 0) {
-          await endCallRoom(callId);
-          try {
+      void setMemberState(callId, me, "left").catch(() => undefined);
+      // Missing call_members table returns 0 — also trust live remote streams
+      const remoteCount = remoteRef.current.size;
+      void countJoinedMembers(callId)
+        .then((dbN) => {
+          const others = Math.max(remoteCount, Math.max(0, dbN - 1));
+          if (others !== 0) return undefined;
+          return endCallRoom(callId).then(() => {
             stopInviteRing(callId);
             stopRoomAnnounce(callId, true);
             broadcastInviteCancel(callId, me);
-          } catch {}
-        }
-      } catch {}
+          });
+        })
+        .catch(() => undefined);
       void logCallEnd(callId, startedAt, withVideoRef.current);
     }
     localCleanup();

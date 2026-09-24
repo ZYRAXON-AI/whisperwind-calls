@@ -111,6 +111,16 @@ export function ChatRoom({
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
     void initPushSubscription(user.id);
+    // AudioContext stays locked until a real user gesture — unlock on first touch/click/key
+    const unlock = () => unlockSound();
+    window.addEventListener("pointerdown", unlock, { once: true });
+    window.addEventListener("keydown", unlock, { once: true });
+    document.addEventListener("pointerdown", unlock, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+      document.removeEventListener("pointerdown", unlock);
+    };
   }, [loadProfiles, loadFriendships, user.id]);
 
   useEffect(() => {
@@ -163,16 +173,16 @@ export function ChatRoom({
 
   // Incoming call ringtone (caller-selected) + loud background notify + vibrate
   useEffect(() => {
-    if (call.status === "incoming") {
+    if (call.status === "incoming" && call.incoming) {
+      unlockSound();
       startRingtone(call.callerRingtone);
-      const callerName =
-        (call.incoming ? profiles[call.incoming.callerId]?.display_name : undefined) ?? "Someone";
+      const callerName = profiles[call.incoming.callerId]?.display_name ?? "Someone";
       notify(
-        `Incoming ${call.incoming?.withVideo ? "video" : "audio"} call`,
+        `Incoming ${call.incoming.withVideo ? "video" : "audio"} call`,
         `${callerName} is calling you — tap to answer`,
         {
           force: true,
-          tag: `call-${call.incoming?.callId ?? "in"}`,
+          tag: `call-${call.incoming.callId}`,
           vibrate: [500, 200, 500, 200, 700],
         }
       );

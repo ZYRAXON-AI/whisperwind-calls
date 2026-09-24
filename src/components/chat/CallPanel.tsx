@@ -101,6 +101,7 @@ export function CallPanel({
   selfProfile?: Profile | undefined;
 }) {
   const [isMinimized, setIsMinimized] = useState(false);
+  const [busy, setBusy] = useState<"accept" | "decline" | "hangup" | null>(null);
 
   const remoteIds = useMemo(() => Object.keys(call.remoteStreams), [call.remoteStreams]);
   const participantCount = remoteIds.length + (call.localStream ? 1 : 0);
@@ -126,26 +127,38 @@ export function CallPanel({
           <div className="mt-8 flex justify-center gap-6">
             <button
               type="button"
+              disabled={busy !== null}
               onClick={() => {
-                void call.decline().catch(() => {
-                  toast.error("Could not decline the call");
-                });
+                if (busy) return;
+                setBusy("decline");
+                void call
+                  .decline()
+                  .catch(() => {
+                    toast.error("Could not decline the call");
+                  })
+                  .finally(() => setBusy(null));
               }}
-              className="grid h-14 w-14 place-items-center rounded-full bg-destructive text-destructive-foreground shadow-lg transition hover:scale-105 active:scale-95"
+              className="grid h-14 w-14 place-items-center rounded-full bg-destructive text-destructive-foreground shadow-lg transition hover:scale-105 active:scale-95 disabled:opacity-60"
               aria-label="Decline"
             >
               <PhoneOff className="h-6 w-6" />
             </button>
             <button
               type="button"
+              disabled={busy !== null}
               onClick={() => {
-                void call.accept().catch((err: unknown) => {
-                  toast.error(
-                    err instanceof Error && err.message ? err.message : "Could not join the call"
-                  );
-                });
+                if (busy) return;
+                setBusy("accept");
+                void call
+                  .accept()
+                  .catch((err: unknown) => {
+                    toast.error(
+                      err instanceof Error && err.message ? err.message : "Could not join the call"
+                    );
+                  })
+                  .finally(() => setBusy(null));
               }}
-              className="gradient-romance grid h-14 w-14 place-items-center rounded-full text-primary-foreground shadow-lg ring-4 ring-primary/30 transition hover:scale-105 active:scale-95 animate-pulse"
+              className="gradient-romance grid h-14 w-14 place-items-center rounded-full text-primary-foreground shadow-lg ring-4 ring-primary/30 transition hover:scale-105 active:scale-95 animate-pulse disabled:opacity-60"
               aria-label="Accept"
             >
               <PhoneIncoming className="h-6 w-6" />
@@ -201,11 +214,17 @@ export function CallPanel({
 
       <button
         type="button"
+        disabled={busy === "hangup"}
         onClick={() => {
-          void call.hangup().catch(() => toast.error("Could not leave the call"));
+          if (busy) return;
+          setBusy("hangup");
+          void call
+            .hangup()
+            .catch(() => toast.error("Could not leave the call"))
+            .finally(() => setBusy(null));
         }}
         aria-label="Leave call"
-        className="grid h-12 w-12 place-items-center rounded-full bg-destructive text-destructive-foreground shadow-xl transition hover:opacity-90 active:scale-95"
+        className="grid h-12 w-12 place-items-center rounded-full bg-destructive text-destructive-foreground shadow-xl transition hover:opacity-90 active:scale-95 disabled:opacity-60"
       >
         <PhoneOff className="h-5 w-5" />
       </button>
@@ -273,10 +292,16 @@ export function CallPanel({
           )}
           <button
             type="button"
+            disabled={busy === "hangup"}
             onClick={() => {
-              void call.hangup().catch(() => toast.error("Could not leave the call"));
+              if (busy) return;
+              setBusy("hangup");
+              void call
+                .hangup()
+                .catch(() => toast.error("Could not leave the call"))
+                .finally(() => setBusy(null));
             }}
-            className="grid h-9 w-9 place-items-center rounded-full bg-destructive text-white shadow"
+            className="grid h-9 w-9 place-items-center rounded-full bg-destructive text-white shadow disabled:opacity-60"
           >
             <PhoneOff className="h-4 w-4" />
           </button>

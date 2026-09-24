@@ -37,6 +37,7 @@ export type CallInvite = {
 };
 
 export type InviteCancel = { callId: string; callerId: string };
+export type InviteDeclined = { callId: string; userId: string; callerId: string };
 
 // calls/call_members may be missing until migration runs — bypass typed client
 const raw = () => supabase as unknown as SupabaseClient;
@@ -62,10 +63,12 @@ type InviteHandler = (invite: CallInvite) => void;
 type CancelHandler = (cancel: InviteCancel) => void;
 type RoomHandler = (row: CallRow) => void;
 type RoomCloseHandler = (payload: { callId: string }) => void;
+type DeclinedHandler = (payload: InviteDeclined) => void;
 const inviteHandlers = new Set<InviteHandler>();
 const cancelHandlers = new Set<CancelHandler>();
 const roomOpenHandlers = new Set<RoomHandler>();
 const roomCloseHandlers = new Set<RoomCloseHandler>();
+const declinedHandlers = new Set<DeclinedHandler>();
 const inboxChannels = new Map<string, RealtimeChannel>();
 let inviteCh: RealtimeChannel | null = null;
 let inviteReady: Promise<void> = Promise.resolve();
@@ -73,6 +76,7 @@ let ringTimer: ReturnType<typeof setInterval> | null = null;
 let ringInvites: CallInvite[] = [];
 let roomTimer: ReturnType<typeof setInterval> | null = null;
 let roomOpenRow: CallRow | null = null;
+const declinedBy = new Map<string, Set<string>>();
 
 function waitChannel(ch: RealtimeChannel): Promise<void> {
   if (ch.state === "SUBSCRIBED") return Promise.resolve();
@@ -126,6 +130,16 @@ function ensureInviteChannel(): RealtimeChannel {
       } catch {}
     });
   });
+  ch.on("broadcast", { event: "invite_declined" }, ({ payload }) => {
+    const d = payload as InviteDeclined | null;
+    if (!d?.callId || !d.userId) return;
+    markInviteDeclined(d.callId, d.userId);
+    declinedHandlers.forEach((h) => {
+      try {
+        h(d);
+      } catch {}
+    });
+  });
   inviteCh = ch;
   inviteReady = waitChannel(ch);
   return ch;
@@ -156,7 +170,12 @@ export function subscribeInviteCancels(handler: CancelHandler): () => void {
   };
 }
 
-export function ensurePersonalInviteInbox(userId: string, onInvite: InviteHandler, onCancel: CancelHandler): () => void {
+export function ensurePersonalInviteInbox(
+  userId: string,
+  onInvite: InviteHandler,
+  onCancel: CancelHandler,
+  onDeclined?: DeclinedHandler
+): () => void {
   const ch = supabase.channel(`call-inbox-${userId}`);
   ch.on("broadcast", { event: "invite" }, ({ payload }) => {
     const inv = payload as CallInvite | null;
@@ -166,18 +185,74 @@ export function ensurePersonalInviteInbox(userId: string, onInvite: InviteHandle
     const c = payload as InviteCancel | null;
     if (c?.callId) onCancel(c);
   });
+  if (onDeclined) {
+    ch.on("broadcast", { event: "invite_declined" }, ({ payload }) => {
+      const d = payload as InviteDeclined | null;
+      if (d?.callId && d.userId) {
+        markInviteDeclined(d.callId, d.userId);
+        onDeclined(d);
+      }
+    });
+  }
   ch.subscribe();
   inboxChannels.set(userId, ch);
   return () => {
     inviteHandlers.delete(onInvite);
     cancelHandlers.delete(onCancel);
+    if (onDeclined) declinedHandlers.delete(onDeclined);
     supabase.removeChannel(ch);
     if (inboxChannels.get(userId) === ch) inboxChannels.delete(userId);
   };
 }
 
+export function subscribeInviteDeclines(handler: DeclinedHandler): () => void {
+  declinedHandlers.add(handler);
+  ensureInviteChannel();
+  return () => {
+    declinedHandlers.delete(handler);
+  };
+}
+
+export function markInviteDeclined(callId: string, userId: string): void {
+  let set = declinedBy.get(callId);
+  if (!set) {
+    set = new Set<string>();
+    declinedBy.set(callId, set);
+  }
+  set.add(userId);
+  removeInvitee(callId, userId);
+}
+
+export function isInviteDeclined(callId: string, userId: string): boolean {
+  return declinedBy.get(callId)?.has(userId) ?? false;
+}
+
+export function removeInvitee(callId: string, userId: string): void {
+  ringInvites = ringInvites.filter((i) => !(i.callId === callId && i.to === userId));
+  if (!ringInvites.length && ringTimer) {
+    clearInterval(ringTimer);
+    ringTimer = null;
+  }
+}
+
+export function broadcastInviteDeclined(callId: string, userId: string, callerId: string): void {
+  const payload: InviteDeclined = { callId, userId, callerId };
+  markInviteDeclined(callId, userId);
+  try {
+    const ch = ensureInviteChannel();
+    ch.send({ type: "broadcast", event: "invite_declined", payload });
+  } catch {}
+  try {
+    const inbox = ensureInbox(callerId);
+    void waitChannel(inbox).then(() => {
+      inbox.send({ type: "broadcast", event: "invite_declined", payload });
+    });
+  } catch {}
+}
+
 async function broadcastInvite(invite: CallInvite): Promise<void> {
   try {
+    if (invite.to && isInviteDeclined(invite.callId, invite.to)) return;
     const ch = ensureInviteChannel();
     await inviteReady;
     ch.send({ type: "broadcast", event: "invite", payload: invite });
@@ -199,7 +274,9 @@ export function broadcastInviteCancel(callId: string, callerId: string): void {
 
 // Keep ringing until hangup so peers who open the app late still get the call
 export function startInviteRing(invites: CallInvite[]): void {
-  ringInvites = invites.filter((i) => i.callId && i.callerId);
+  ringInvites = invites
+    .filter((i) => i.callId && i.callerId)
+    .filter((i) => !(i.to && isInviteDeclined(i.callId, i.to)));
   const tick = () => {
     for (const inv of ringInvites) void broadcastInvite(inv);
   };

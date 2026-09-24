@@ -31,6 +31,7 @@ if (typeof document !== "undefined") {
 export function unlockSound() {
   const c = audio();
   if (!c) return;
+  if (c.state === "suspended") void c.resume();
   const osc = c.createOscillator();
   const gain = c.createGain();
   gain.gain.value = 0.0001;
@@ -63,6 +64,10 @@ function tone(
 
 // Soft ascending chime — plays when a message is sent or received
 export function playMessageSound() {
+  unlockSound();
+  const c = audio();
+  if (!c) return;
+  if (c.state === "suspended") void c.resume();
   tone(784, 0, 0.12, 0.16, "sine"); // G5
   tone(988, 0.07, 0.14, 0.15, "sine"); // B5
   tone(1318.5, 0.15, 0.24, 0.17, "triangle"); // E6
@@ -70,6 +75,10 @@ export function playMessageSound() {
 
 // Louder ring for incoming calls (survives brief AudioContext pauses)
 export function playCallAlert() {
+  unlockSound();
+  const c = audio();
+  if (!c) return;
+  if (c.state === "suspended") void c.resume();
   tone(880, 0, 0.2, 0.35, "triangle");
   tone(1108, 0.18, 0.2, 0.35, "triangle");
   tone(1318, 0.36, 0.3, 0.4, "sine");
@@ -186,6 +195,9 @@ function stopYoutubeRingtone() {
 // Play the caller-selected ringtone (preset id or yt:VIDEOID)
 export function startRingtone(presetId?: string) {
   if (ringTimer) return;
+  unlockSound();
+  const c = audio();
+  if (c && c.state === "suspended") void c.resume();
   const id = presetId || getSavedRingtone();
 
   // YouTube ringtone
@@ -198,6 +210,8 @@ export function startRingtone(presetId?: string) {
 
   tune.play();
   ringTimer = setInterval(() => {
+    const cc = audio();
+    if (cc && cc.state === "suspended") void cc.resume();
     tune.play();
   }, 1800);
 }
