@@ -37,21 +37,24 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
 
   // Capture PWA install prompt for mobile & desktop
   useEffect(() => {
-    const handler = (e: any) => { e.preventDefault(); setInstallPrompt(e); };
+    const handler = (e: any) => {
+      e.preventDefault();
+      setInstallPrompt(e);
+    };
     window.addEventListener("beforeinstallprompt", handler);
     return () => window.removeEventListener("beforeinstallprompt", handler);
   }, []);
 
   async function handleInstallApp() {
     if (!installPrompt) {
-      toast("To install, tap your browser's menu (⋮) and select 'Add to Home screen' or 'Install'.");
+      toast.info("মোবাইলে ইনস্টল করতে ব্রাউজারের থ্রি-ডট (⋮) মেনু চেপে 'Install app' অথবা 'Add to Home screen' নির্বাচন করুন।");
       return;
     }
     installPrompt.prompt();
     const { outcome } = await installPrompt.userChoice;
     if (outcome === "accepted") {
       setInstallPrompt(null);
-      toast.success("Zyraxon installed successfully!");
+      toast.success("Zyraxon সফলভাবে ইনস্টল হয়েছে!");
     }
   }
 
@@ -95,22 +98,28 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
           await presenceChannel.track({ online_at: new Date().toISOString() });
         }
       });
-    return () => { supabase.removeChannel(presenceChannel); };
+    return () => {
+      supabase.removeChannel(presenceChannel);
+    };
   }, [user.id]);
 
   useEffect(() => {
     const channel = supabase.channel("zyraxon-social")
-      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => { void loadProfiles(); })
+      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => {
+        void loadProfiles();
+      })
       .on("postgres_changes", { event: "*", schema: "public", table: "friendships" }, (payload) => {
         void loadFriendships();
         const row = payload.new as Friendship | null;
         if (payload.eventType === "INSERT" && row?.addressee_id === user.id) {
           playMessageSound();
-          toast("New friend request received");
+          toast.info("নতুন ফ্রেন্ড রিকোয়েস্ট এসেছে!");
         }
       })
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [loadProfiles, loadFriendships, user.id]);
 
   useEffect(() => {
@@ -125,19 +134,37 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
   const me = profiles[user.id];
 
   async function addFriend(id: string) {
+    if (id === user.id) return;
+    const existing = friendships.find(
+      (f) =>
+        (f.requester_id === user.id && f.addressee_id === id) ||
+        (f.requester_id === id && f.addressee_id === user.id),
+    );
+    if (existing) {
+      toast.info("ইতিমধ্যেই ফ্রেন্ড রিকোয়েস্ট পাঠানো আছে বা যুক্ত আছেন।");
+      return;
+    }
     const { error } = await supabase.from("friendships").insert({ requester_id: user.id, addressee_id: id });
-    if (error) toast.error("Could not send request");
-    else { toast.success("Request sent"); void loadFriendships(); }
+    if (error) {
+      toast.error("রিকোয়েস্ট পাঠানো যায়নি: " + error.message);
+    } else {
+      toast.success("ফ্রেন্ড রিকোয়েস্ট পাঠানো হয়েছে!");
+      void loadFriendships();
+    }
   }
 
   async function acceptRequest(rowId: string) {
     const { error } = await supabase.from("friendships").update({ status: "accepted" }).eq("id", rowId);
-    if (error) toast.error("Could not accept");
-    else void loadFriendships();
+    if (error) toast.error("গ্রহণে সমস্যা হয়েছে");
+    else {
+      toast.success("ফ্রেন্ড রিকোয়েস্ট গ্রহণ করা হয়েছে!");
+      void loadFriendships();
+    }
   }
 
   async function removeFriendship(rowId: string) {
     await supabase.from("friendships").delete().eq("id", rowId);
+    toast.info("তালিকা আপডেট করা হয়েছে");
     void loadFriendships();
   }
 
