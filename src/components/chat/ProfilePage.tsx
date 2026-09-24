@@ -24,7 +24,7 @@ export function ProfilePage({
   profile,
   me,
   friendships,
-  friendCount,
+  friendCount = 0,
   onBack,
   onAdd,
   onAccept,
@@ -33,10 +33,10 @@ export function ProfilePage({
   profile: Profile;
   me: string;
   friendships: Friendship[];
-  friendCount: number;
+  friendCount?: number;
   onBack: () => void;
   onAdd: (id: string) => void;
-  onAccept: (id: string) => void;
+  onAccept?: (id: string) => void;
   onMessage: (id: string) => void;
 }) {
   const [avatar, setAvatar] = useState("");

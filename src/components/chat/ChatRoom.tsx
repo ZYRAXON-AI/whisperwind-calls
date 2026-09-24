@@ -516,19 +516,19 @@ export function ChatRoom({
             <YouTubePanel onOpenMenu={() => setNavOpen(true)} />
           </div>
 
-          <div className={view.type === "profile" ? "h-full" : "pointer-events-none hidden"}>
+          {/* ProfilePage conditional — profile ডেটা ছাড়া mount করলে crash হতে পারে */}
+          {view.type === "profile" && view.userId && profiles[view.userId] && (
             <ProfilePage
-              userId={view.userId}
-              meId={user.id}
               profile={profiles[view.userId]}
+              me={user.id}
               friendships={friendships}
-              isOnline={onlineUserIds.has(view.userId)}
-              onAddFriend={addFriend}
-              onOpenDm={(peerId) => go({ type: "dm", peerId })}
+              friendCount={friendIdsOf(friendships, view.userId).length}
               onBack={() => go({ type: "group" })}
-              onOpenEdit={() => setProfileOpen(true)}
+              onAdd={addFriend}
+              onAccept={(rowId) => acceptRequest(rowId)}
+              onMessage={(peerId) => go({ type: "dm", peerId })}
             />
-          </div>
+          )}
         </div>
       </div>
 
