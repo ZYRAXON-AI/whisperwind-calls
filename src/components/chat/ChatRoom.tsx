@@ -1,117 +1,144 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Bell, Circle, Download, Heart, LogOut, Menu, MessageCircle,
-  Phone, Play, Settings, Shield, UserPlus, Users, Video as VideoIcon, X,
+  Bell,
+  Circle,
+  Download,
+  Heart,
+  LogOut,
+  Menu,
+  Phone,
+  Play,
+  Settings,
+  UserPlus,
+  Users,
+  Video as VideoIcon,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
-import type { User } from "@supabase/supabase-js";
-import { Backdrop } from "@/components/Backdrop";
+
 import { Avatar } from "./Avatar";
 import { CallPanel } from "./CallPanel";
 import { Conversation } from "./Conversation";
-import { FriendsPanel, RequestsPanel } from "./FriendsPanel";
+import { FriendsPanel } from "./FriendsPanel";
 import { ProfileDialog } from "./ProfileDialog";
 import { ProfilePage } from "./ProfilePage";
+import { RingtoneDialog } from "./RingtoneDialog";
 import { YouTubePanel } from "./YouTubePanel";
 import { supabase } from "@/integrations/supabase/client";
 import { signedUrl } from "@/lib/media";
 import {
-  ensureNotificationPermission, playMessageSound, startRingtone,
-  stopRingtone, unlockSound,
+  type Friendship,
+  type Profile,
+  type View,
+  friendIdsOf,
+} from "@/lib/social";
+import {
+  ensureNotificationPermission,
+  playMessageSound,
+  startRingtone,
+  stopRingtone,
+  unlockSound,
 } from "@/lib/sounds";
-import type { Friendship, Profile, View } from "@/lib/social";
-import { friendIdsOf } from "@/lib/social";
 import { useCall } from "@/lib/useCall";
 
-export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => void }) {
+export function ChatRoom({
+  user,
+  onSignOut,
+}: {
+  user: { id: string; email?: string | null };
+  onSignOut: () => void;
+}) {
+  const [view, setView] = useState<View>({ type: "group" });
   const [profiles, setProfiles] = useState<Record<string, Profile>>({});
   const [friendships, setFriendships] = useState<Friendship[]>([]);
-  const [view, setView] = useState<View>({ type: "group" });
-  const [profileOpen, setProfileOpen] = useState(false);
-  const [avatarSrc, setAvatarSrc] = useState("");
-  const [navOpen, setNavOpen] = useState(false);
   const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(new Set());
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [ringtoneOpen, setRingtoneOpen] = useState(false);
+  const [avatarSrc, setAvatarSrc] = useState<string>("");
+  const [navOpen, setNavOpen] = useState(false);
   const [installPrompt, setInstallPrompt] = useState<any>(null);
-  const call = useCall(user.id);
-  const isGuest = user.email?.endsWith("@guest.local") || false;
 
-  // Capture PWA install prompt for mobile & desktop
+  const call = useCall(user.id);
+
   useEffect(() => {
-    const handler = (e: any) => {
+    const handleBeforeInstall = (e: Event) => {
       e.preventDefault();
       setInstallPrompt(e);
     };
-    window.addEventListener("beforeinstallprompt", handler);
-    return () => window.removeEventListener("beforeinstallprompt", handler);
+    window.addEventListener("beforeinstallprompt", handleBeforeInstall);
+    return () => window.removeEventListener("beforeinstallprompt", handleBeforeInstall);
   }, []);
 
-  async function handleInstallApp() {
-    if (!installPrompt) {
-      toast.info("মোবাইলে ইনস্টল করতে ব্রাউজারের থ্রি-ডট (⋮) মেনু চেপে 'Install app' অথবা 'Add to Home screen' নির্বাচন করুন।");
-      return;
+  const handleInstallApp = async () => {
+    if (installPrompt) {
+      installPrompt.prompt();
+      const choice = await installPrompt.userChoice;
+      if (choice.outcome === "accepted") {
+        setInstallPrompt(null);
+        toast.success("অ্যাপ্লিকেশন সফলভাবে ইনস্টল করা হয়েছে!");
+      }
+    } else {
+      toast.info("মোবাইলে ইনস্টল করতে ব্রাউজারের থ্রি-ডট (⋮) মেনু থেকে 'Install app' বা 'Add to Home screen' চাপুন।");
     }
-    installPrompt.prompt();
-    const { outcome } = await installPrompt.userChoice;
-    if (outcome === "accepted") {
-      setInstallPrompt(null);
-      toast.success("Zyraxon সফলভাবে ইনস্টল হয়েছে!");
-    }
-  }
+  };
 
   const loadProfiles = useCallback(async () => {
-    const { data } = await supabase.from("profiles").select("id, display_name, avatar_url, created_at");
-    if (!data) return;
-    const map: Record<string, Profile> = {};
-    for (const p of data) map[p.id] = p as Profile;
-    setProfiles(map);
-    const mine = map[user.id];
-    if (mine?.avatar_url) {
-      setAvatarSrc(mine.avatar_url.startsWith("http") ? mine.avatar_url : await signedUrl(mine.avatar_url));
-    } else {
-      setAvatarSrc("");
+    const { data } = await supabase.from("profiles").select("*");
+    if (data) {
+      const map: Record<string, Profile> = {};
+      for (const p of data) map[p.id] = p as Profile;
+      setProfiles(map);
     }
-  }, [user.id]);
+  }, []);
 
   const loadFriendships = useCallback(async () => {
-    const { data } = await supabase.from("friendships").select("*");
+    const { data } = await supabase
+      .from("friendships")
+      .select("*")
+      .or(`requester_id.eq.${user.id},addressee_id.eq.${user.id}`);
     if (data) setFriendships(data as Friendship[]);
-  }, []);
+  }, [user.id]);
 
   useEffect(() => {
     void loadProfiles();
     void loadFriendships();
     void ensureNotificationPermission();
-    unlockSound();
   }, [loadProfiles, loadFriendships]);
 
-  // Realtime Presence tracking
   useEffect(() => {
-    const presenceChannel = supabase.channel("zyraxon-online-status", { config: { presence: { key: user.id } } });
-    presenceChannel
-      .on("presence", { event: "sync" }, () => {
-        const state = presenceChannel.presenceState();
-        const activeIds = new Set<string>(Object.keys(state));
-        setOnlineUserIds(activeIds);
-      })
-      .subscribe(async (status) => {
-        if (status === "SUBSCRIBED") {
-          await presenceChannel.track({ online_at: new Date().toISOString() });
-        }
-      });
+    const me = profiles[user.id];
+    if (me?.avatar_url) {
+      void signedUrl(me.avatar_url).then((u) => setAvatarSrc(u || ""));
+    } else {
+      setAvatarSrc("");
+    }
+  }, [profiles, user.id]);
+
+  // Realtime Presence & Friendships Channel
+  useEffect(() => {
+    const ch = supabase.channel("zyraxon-presence", {
+      config: { presence: { key: user.id } },
+    });
+    ch.on("presence", { event: "sync" }, () => {
+      const state = ch.presenceState();
+      setOnlineUserIds(new Set(Object.keys(state)));
+    }).subscribe(async (status) => {
+      if (status === "SUBSCRIBED") {
+        await ch.track({ online_at: new Date().toISOString() });
+      }
+    });
     return () => {
-      supabase.removeChannel(presenceChannel);
+      supabase.removeChannel(ch);
     };
   }, [user.id]);
 
   useEffect(() => {
-    const channel = supabase.channel("zyraxon-social")
-      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => {
-        void loadProfiles();
-      })
+    const channel = supabase
+      .channel("zyraxon-social")
       .on("postgres_changes", { event: "*", schema: "public", table: "friendships" }, (payload) => {
         void loadFriendships();
-        const row = payload.new as Friendship | null;
-        if (payload.eventType === "INSERT" && row?.addressee_id === user.id) {
+        const f = payload.new as Friendship | undefined;
+        if (f && f.addressee_id === user.id && f.status === "pending" && payload.eventType === "INSERT") {
           playMessageSound();
           toast.info("নতুন ফ্রেন্ড রিকোয়েস্ট এসেছে!");
         }
@@ -122,11 +149,15 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
     };
   }, [loadProfiles, loadFriendships, user.id]);
 
+  // ইনকামিং কলের রিংটোন বাজানো (কলার যে রিংটোন সেট করেছে সেটিই বাজবে)
   useEffect(() => {
-    if (call.status === "incoming") startRingtone();
-    else stopRingtone();
+    if (call.status === "incoming") {
+      startRingtone(call.callerRingtone);
+    } else {
+      stopRingtone();
+    }
     return stopRingtone;
-  }, [call.status]);
+  }, [call.status, call.callerRingtone]);
 
   const friendIds = useMemo(() => friendIdsOf(friendships, user.id), [friendships, user.id]);
   const friends = friendIds.map((id) => profiles[id]).filter(Boolean) as Profile[];
@@ -138,7 +169,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
     const existing = friendships.find(
       (f) =>
         (f.requester_id === user.id && f.addressee_id === id) ||
-        (f.requester_id === id && f.addressee_id === user.id),
+        (f.requester_id === id && f.addressee_id === user.id)
     );
     if (existing) {
       toast.info("ইতিমধ্যেই ফ্রেন্ড রিকোয়েস্ট পাঠানো আছে বা যুক্ত আছেন।");
@@ -162,89 +193,91 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
     }
   }
 
-  async function removeFriendship(rowId: string) {
-    await supabase.from("friendships").delete().eq("id", rowId);
-    toast.info("তালিকা আপডেট করা হয়েছে");
-    void loadFriendships();
+  async function declineRequest(rowId: string) {
+    const { error } = await supabase.from("friendships").delete().eq("id", rowId);
+    if (error) toast.error("বাতিল করা যায়নি");
+    else void loadFriendships();
   }
 
-  function go(next: View) {
-    setView(next);
+  const go = (v: View) => {
+    unlockSound();
+    setView(v);
     setNavOpen(false);
-  }
+  };
 
   const navItem = (active: boolean) =>
-    `flex w-full items-center gap-3 rounded-2xl px-3.5 py-2.5 text-sm font-medium transition ${
-      active ? "gradient-romance text-primary-foreground shadow-md" : "hover:bg-white/10"
+    `flex items-center gap-3 rounded-2xl px-3.5 py-2.5 text-sm font-medium transition ${
+      active ? "bg-white/15 text-foreground shadow" : "text-muted-foreground hover:bg-white/10 hover:text-foreground"
     }`;
 
   const peer = view.type === "dm" ? profiles[view.peerId] : null;
-  const isPeerOnline = peer ? onlineUserIds.has(peer.id) : onlineUserIds.size > 1;
+  const isPeerOnline = view.type === "dm" && view.peerId ? onlineUserIds.has(view.peerId) : onlineUserIds.size > 1;
 
   const headerTitle =
-    view.type === "dm" ? (peer?.display_name ?? "Chat") :
-    view.type === "youtube" ? "YouTube" :
-    view.type === "friends" ? "Friends" :
-    view.type === "requests" ? "Requests" :
-    view.type === "profile" ? "Profile" : "Zyraxon";
+    view.type === "dm"
+      ? peer?.display_name ?? "Direct Message"
+      : view.type === "friends"
+      ? "People & Friends"
+      : view.type === "requests"
+      ? "Friend Requests"
+      : view.type === "youtube"
+      ? "YouTube Music & Chill"
+      : view.type === "profile"
+      ? "User Profile"
+      : "Zyraxon AI Space";
 
   return (
-    <div className="relative flex h-dvh w-full overflow-hidden flex-col md:flex-row" onPointerDown={unlockSound}>
-      <Backdrop />
-
-      {/* Dark overlay backdrop for mobile sidebar */}
+    <div className="relative flex h-screen w-screen overflow-hidden p-0 sm:p-3">
+      {/* Mobile Sidebar Overlay */}
       {navOpen && (
         <div
-          role="button"
-          tabIndex={0}
-          aria-label="Close menu"
           onClick={() => setNavOpen(false)}
-          onKeyDown={(e) => e.key === "Escape" && setNavOpen(false)}
-          className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm transition-opacity md:hidden"
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm transition-opacity md:hidden"
         />
       )}
 
-      {/* Sidebar (Desktop static, Mobile slide-over) */}
+      {/* Sidebar Navigation */}
       <aside
-        className={`glass-strong fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col gap-3 p-3.5 shadow-2xl transition-transform duration-300 md:static md:m-3 md:w-72 md:translate-x-0 md:rounded-3xl md:shadow-none ${
-          navOpen ? "translate-x-0" : "-translate-x-full"
+        className={`fixed inset-y-0 left-0 z-50 flex w-72 flex-col gap-3 p-4 transition-transform duration-300 md:static md:z-auto md:w-64 md:translate-x-0 md:p-3 glass-strong md:rounded-3xl border-r md:border border-white/10 ${
+          navOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full md:translate-x-0"
         }`}
       >
-        <div className="flex items-center gap-3 px-1.5 pt-1">
-          <div className="gradient-romance grid h-10 w-10 shrink-0 place-items-center rounded-2xl text-primary-foreground shadow">
-            <Heart className="h-5 w-5" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-base font-semibold leading-tight">Zyraxon</p>
-            <p className="truncate text-xs text-muted-foreground flex items-center gap-1">
-              {isGuest && <Shield className="h-3 w-3 text-amber-400 shrink-0" />}
-              {me?.display_name ?? (isGuest ? "Guest User" : "You")}
-            </p>
-          </div>
+        <div className="flex items-center justify-between px-2 pt-1">
+          <button
+            type="button"
+            onClick={() => go({ type: "group" })}
+            className="flex items-center gap-2.5 text-left"
+          >
+            <div className="gradient-romance grid h-9 w-9 place-items-center rounded-2xl text-primary-foreground shadow">
+              <Heart className="h-4 w-4" />
+            </div>
+            <div>
+              <p className="font-bold leading-none tracking-tight">ZYRAXON</p>
+              <p className="text-[10px] text-muted-foreground">Private Universe</p>
+            </div>
+          </button>
           <button
             type="button"
             onClick={() => setNavOpen(false)}
             aria-label="Close menu"
-            className="glass grid h-9 w-9 shrink-0 place-items-center rounded-full hover:bg-white/20 active:scale-95 md:hidden"
+            className="glass grid h-8 w-8 place-items-center rounded-full md:hidden"
           >
-            <X className="h-5 w-5" />
+            <X className="h-4 w-4" />
           </button>
         </div>
 
-        {isGuest && (
-          <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-300">
-            No-Cloud Mode: Chat and media will not be saved to cloud database.
-          </div>
-        )}
-
         <nav className="flex flex-col gap-1">
           <button type="button" className={navItem(view.type === "group")} onClick={() => go({ type: "group" })}>
-            <MessageCircle className="h-4 w-4" /> Group chat
+            <Users className="h-4 w-4" /> Global Lounge
           </button>
           <button type="button" className={navItem(view.type === "friends")} onClick={() => go({ type: "friends" })}>
-            <Users className="h-4 w-4" /> Friends
+            <UserPlus className="h-4 w-4" /> Add Friends
           </button>
-          <button type="button" className={navItem(view.type === "requests")} onClick={() => go({ type: "requests" })}>
+          <button
+            type="button"
+            className={navItem(view.type === "requests")}
+            onClick={() => go({ type: "requests" })}
+          >
             <Bell className="h-4 w-4" /> Requests
             {requests.length > 0 && (
               <span className="ml-auto grid h-5 min-w-5 place-items-center rounded-full bg-destructive px-1.5 text-[11px] font-semibold text-destructive-foreground">
@@ -256,6 +289,15 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
             <Play className="h-4 w-4" /> YouTube
           </button>
         </nav>
+
+        {/* Ringtone Settings Button */}
+        <button
+          type="button"
+          onClick={() => setRingtoneOpen(true)}
+          className="glass flex items-center gap-2.5 rounded-2xl border border-primary/30 px-3.5 py-2 text-xs font-semibold text-primary transition hover:bg-primary/20"
+        >
+          <Bell className="h-4 w-4" /> Set Caller Ringtone
+        </button>
 
         <button
           type="button"
@@ -318,9 +360,7 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
 
       {/* Main column */}
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {/* Header with guaranteed visible 3-line hamburger menu on mobile */}
         <header className="glass-strong z-20 m-2 sm:m-3 flex shrink-0 items-center gap-2 rounded-2xl sm:rounded-3xl px-3 py-2.5 sm:px-4 sm:py-3 shadow-lg">
-          {/* 3-rack / Hamburger Button for mobile */}
           <button
             type="button"
             onClick={() => setNavOpen(true)}
@@ -351,6 +391,16 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
               {isPeerOnline ? "Online now" : "Offline"}
             </p>
           </div>
+
+          <button
+            type="button"
+            aria-label="Caller Tune & Ringtone"
+            onClick={() => setRingtoneOpen(true)}
+            title="Set custom ringtone"
+            className="glass shrink-0 grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15 text-primary"
+          >
+            <Bell className="h-4 w-4" />
+          </button>
 
           <button
             type="button"
@@ -400,50 +450,89 @@ export function ChatRoom({ user, onSignOut }: { user: User; onSignOut: () => voi
 
           {view.type === "friends" && (
             <FriendsPanel
-              profiles={Object.values(profiles)}
-              friendships={friendships}
               me={user.id}
-              onAdd={(id) => void addFriend(id)}
-              onAccept={(id) => void acceptRequest(id)}
-              onRemove={(id) => void removeFriendship(id)}
-              onOpenProfile={(id) => go({ type: "profile", userId: id })}
-              onMessage={(id) => go({ type: "dm", peerId: id })}
+              profiles={profiles}
+              friendships={friendships}
+              onlineUserIds={onlineUserIds}
+              onAddFriend={addFriend}
+              onOpenDm={(peerId) => go({ type: "dm", peerId })}
+              onOpenProfile={(userId) => go({ type: "profile", userId })}
             />
           )}
 
           {view.type === "requests" && (
-            <RequestsPanel
-              requests={requests}
-              profiles={profiles}
-              onAccept={(id) => void acceptRequest(id)}
-              onDecline={(id) => void removeFriendship(id)}
-              onOpenProfile={(id) => go({ type: "profile", userId: id })}
-            />
+            <div className="scroll-soft mx-auto h-full max-w-xl overflow-y-auto p-4">
+              <h2 className="mb-4 text-lg font-semibold">Friend requests</h2>
+              {requests.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No pending requests right now.</p>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {requests.map((r) => {
+                    const sender = profiles[r.requester_id];
+                    return (
+                      <div
+                        key={r.id}
+                        className="glass flex items-center justify-between rounded-2xl p-3 shadow"
+                      >
+                        <div
+                          className="flex items-center gap-3 cursor-pointer"
+                          onClick={() => go({ type: "profile", userId: r.requester_id })}
+                        >
+                          <Avatar profile={sender} className="h-10 w-10" />
+                          <div>
+                            <p className="text-sm font-semibold">{sender?.display_name ?? "Someone"}</p>
+                            <p className="text-xs text-muted-foreground">Wants to connect with you</p>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void acceptRequest(r.id)}
+                            className="gradient-romance rounded-xl px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow"
+                          >
+                            Accept
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void declineRequest(r.id)}
+                            className="glass rounded-xl px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground"
+                          >
+                            Decline
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           )}
 
-          {view.type === "youtube" && <YouTubePanel onOpenMenu={() => setNavOpen(true)} />}
+          {view.type === "youtube" && <YouTubePanel />}
 
-          {view.type === "profile" && profiles[view.userId] && (
+          {view.type === "profile" && (
             <ProfilePage
-              profile={profiles[view.userId] as Profile}
-              me={user.id}
+              userId={view.userId}
+              meId={user.id}
+              profile={profiles[view.userId]}
               friendships={friendships}
-              friendCount={friends.length}
+              isOnline={onlineUserIds.has(view.userId)}
+              onAddFriend={addFriend}
+              onOpenDm={(peerId) => go({ type: "dm", peerId })}
               onBack={() => go({ type: "group" })}
-              onAdd={(id) => void addFriend(id)}
-              onAccept={(id) => void acceptRequest(id)}
-              onMessage={(id) => go({ type: "dm", peerId: id })}
+              onOpenEdit={() => setProfileOpen(true)}
             />
           )}
         </div>
       </div>
 
-      {/* Video/Audio Call Overlay */}
-      {call.status !== "idle" && (
-        <CallPanel call={call} peerName={peer?.display_name ?? "Partner"} />
-      )}
+      {/* WebRTC Video/Audio Call Panel */}
+      <CallPanel call={call} peerName={peer?.display_name ?? "Someone"} />
 
-      {/* Profile edit modal */}
+      {/* Ringtone Selection Dialog */}
+      <RingtoneDialog open={ringtoneOpen} onOpenChange={setRingtoneOpen} />
+
+      {/* Profile Edit Dialog */}
       {me && (
         <ProfileDialog
           open={profileOpen}
