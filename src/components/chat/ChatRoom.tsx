@@ -258,6 +258,27 @@ export function ChatRoom({
     call.peerRingtone,
   ]);
 
+  // Background tab → user returns while the call is STILL incoming:
+  // restart the ringtone, because browsers pause sounds in hidden tabs.
+  useEffect(() => {
+    if (call.status !== "incoming") return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        unlockSound();
+        startRingtone(call.callerRingtone);
+        try {
+          navigator.vibrate?.([500, 200, 500, 200, 700]);
+        } catch {}
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [call.status, call.callerRingtone]);
+
   const friendIds = useMemo(() => friendIdsOf(friendships, user.id), [friendships, user.id]);
   const friends = friendIds.map((id) => profiles[id]).filter(Boolean) as Profile[];
   const requests = friendships.filter((f) => f.status === "pending" && f.addressee_id === user.id);
@@ -318,6 +339,9 @@ export function ChatRoom({
       return { ...prev, [threadKey]: next };
     });
   }, []);
+
+  // Facebook-style badge: 1–9 show the count, anything above shows "9+"
+  const badgeLabel = useCallback((n: number) => (n > 9 ? "9+" : String(n)), []);
 
   const navItem = (active: boolean) =>
     `flex items-center gap-3 rounded-2xl px-3.5 py-2.5 text-sm font-medium transition ${
@@ -406,7 +430,7 @@ export function ChatRoom({
             <Users className="h-4 w-4" /> Global Lounge
             {(unread["group"] ?? 0) > 0 && (
               <span className="ml-auto grid h-5 min-w-5 place-items-center rounded-full bg-primary px-1.5 text-[11px] font-semibold text-primary-foreground">
-                {unread["group"]}
+                {badgeLabel(unread["group"])}
               </span>
             )}
           </button>
@@ -475,7 +499,7 @@ export function ChatRoom({
                   </div>
                   {(unread[f.id] ?? 0) > 0 && (
                     <span className="grid h-5 min-w-5 place-items-center rounded-full bg-primary px-1.5 text-[11px] font-semibold text-primary-foreground">
-                      {unread[f.id]}
+                      {badgeLabel(unread[f.id] ?? 0)}
                     </span>
                   )}
                 </button>

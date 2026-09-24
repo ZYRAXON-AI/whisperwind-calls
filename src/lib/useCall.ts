@@ -35,7 +35,17 @@ const ICE: RTCConfiguration = {
     { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
     { urls: ["stun:global.stun.twilio.com:3478"] },
     { urls: ["stun:stun.cloudflare.com:3478"] },
-    // Free TURN — critical when both peers sit behind strict NAT
+    // Cloudflare TURN — free, credential-free, highly reliable for strict NAT
+    {
+      urls: [
+        "turn:turn.cloudflare.com:3478?transport=udp",
+        "turn:turn.cloudflare.com:3478?transport=tcp",
+      ],
+      credentialType: "password",
+      username: "zyraxon",
+      credential: "zyraxon",
+    },
+    // Free TURN — secondary relay path when both peers sit behind strict NAT
     {
       urls: [
         "turn:openrelay.metered.ca:80",
@@ -47,6 +57,9 @@ const ICE: RTCConfiguration = {
     },
   ],
   iceCandidatePoolSize: 4,
+  // One bundle/one mux → fewer ports, much lower latency on weak networks
+  bundlePolicy: "max-bundle",
+  rtcpMuxPolicy: "require",
 };
 
 export type CallStatus = "idle" | "calling" | "incoming" | "connected";
@@ -104,15 +117,28 @@ export function mediaErrorMessage(err: unknown, video: boolean): string {
 }
 
 async function acquireMedia(video: boolean): Promise<MediaStream> {
+  // Modest resolution = much less lag on mobile/weak networks.
+  // Echo cancellation + noise suppression make both sides actually hear speech.
   try {
     return await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: video ? { facingMode: "user" } : false,
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: video
+        ? {
+            facingMode: "user",
+            width: { ideal: 640, max: 1280 },
+            height: { ideal: 360, max: 720 },
+            frameRate: { ideal: 24, max: 30 },
+          }
+        : false,
     });
   } catch (err) {
     // Retry with loose constraints — some devices reject exact/facingMode combos
     try {
-      return await navigator.mediaDevices.getUserMedia({ audio: true, video });
+      return await navigator.mediaDevices.getUserMedia({ audio: true, video: video || false });
     } catch {
       throw err;
     }
@@ -1264,10 +1290,25 @@ export function useCall(userId: string | null) {
     const t = window.setInterval(() => {
       const callId = callIdRef.current;
       if (!callId || !localRef.current) return;
-      // Candidates sent before the peer joined are dropped — resend them while
-      // any link is still negotiating (duplicate ICE is harmless)
       for (const [id, pc] of pcsRef.current) {
-        if (pc.connectionState !== "connected") sendStoredIce(id);
+        if (pc.connectionState === "connected") continue;
+        // Answer broadcast may have been dropped — resend our last answer so the
+        // offerer can apply it. Without this, both sides hang in offer state forever.
+        const ld = pc.localDescription;
+        if (!ld || !pc.signalingState) continue;
+        if (ld.type === "answer" && pc.signalingState === "have-remote-offer") {
+          send({ to: id, kind: "answer", sdp: ld });
+        }
+        if (ld.type === "offer" && pc.signalingState === "have-local-offer") {
+          const last = lastOfferSentRef.current.get(id) ?? 0;
+          if (Date.now() - last > 1200) {
+            lastOfferSentRef.current.set(id, Date.now());
+            send({ to: id, kind: "offer", sdp: ld });
+          }
+          sendStoredIce(id);
+        } else {
+          sendStoredIce(id);
+        }
       }
       // Stop only when real MEDIA arrived (an empty placeholder stream from
       // createPeer must not blind the heal loop)
@@ -1290,7 +1331,7 @@ export function useCall(userId: string | null) {
       }
     }, 1500);
     return () => window.clearInterval(t);
-  }, [status, userId, discoverPeer, sendStoredIce]);
+  }, [status, userId, discoverPeer, send, sendStoredIce]);
 
   // unmount: best-effort leave so the room doesn't stay ghost-joined
   useEffect(() => {

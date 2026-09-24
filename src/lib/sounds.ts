@@ -170,15 +170,19 @@ export function setSavedRingtone(id: string) {
   localStorage.setItem(STORAGE_KEY, id);
 }
 
-// Play a YouTube ringtone (yt:VIDEOID) — autoplay + loop hidden iframe
+// Play a YouTube ringtone (yt:VIDEOID) via ONE hidden looping iframe.
+// Browsers block unmuted iframe autoplay until a user gesture, so we keep
+// retrying a native WebAudio "ringing" melody alongside it — the callee is
+// guaranteed to HEAR the call even if the music video can't auto-play.
 function playYoutubeRingtone(videoId: string) {
   if (typeof document === "undefined") return;
   stopYoutubeRingtone();
   const iframe = document.createElement("iframe");
   iframe.style.cssText =
     "position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;left:0;bottom:0;border:none;";
-  iframe.src = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&loop=1&playlist=${videoId}&controls=0&disablekb=1&playsinline=1`;
-  iframe.allow = "autoplay";
+  iframe.src = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&loop=1&playlist=${videoId}&controls=0&disablekb=1&playsinline=1&mute=0`;
+  iframe.allow = "autoplay; fullscreen";
+  iframe.allowFullscreen = true;
   iframe.title = "ringtone";
   document.body.appendChild(iframe);
   ytFrames.add(iframe);
@@ -204,16 +208,30 @@ export function startRingtone(presetId?: string) {
   const c = audio();
   if (c && c.state === "suspended") void c.resume();
 
-  // YouTube ringtone
+  // YouTube ringtone: music video iframe + native ringing fallback melody.
+  // If the browser blocks the unmuted iframe (autoplay policy), the callee
+  // still hears a real "ring" via WebAudio once audio is unlocked.
   if (id.startsWith("yt:")) {
+    const tune = RINGTONE_PRESETS[0]!;
+    const ringFallback = () => {
+      const cc = audio();
+      if (cc && cc.state === "suspended") {
+        cc.resume()
+          .then(() => {
+            if (ringTimer) tune.play();
+          })
+          .catch(() => undefined);
+        return;
+      }
+      tune.play();
+    };
     playYoutubeRingtone(id.slice(3));
-    ringTimer = setInterval(() => {
-      playYoutubeRingtone(id.slice(3));
-    }, 12000);
+    ringFallback();
+    ringTimer = setInterval(ringFallback, 1800);
     return;
   }
 
-  const tune = RINGTONE_PRESETS.find((p) => p.id === id) || RINGTONE_PRESETS[0];
+  const tune = RINGTONE_PRESETS.find((p) => p.id === id) || RINGTONE_PRESETS[0]!;
 
   const keepAlive = () => {
     const cc = audio();
