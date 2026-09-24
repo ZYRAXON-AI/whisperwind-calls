@@ -13,6 +13,7 @@ import {
   fetchMyOpenCalls,
   getJoinedPeers,
   isInviteDeclined,
+  removeInvitee,
   setCallActive,
   setMemberState,
   startRoomAnnounce,
@@ -50,6 +51,22 @@ type SigPayload = {
   sdp?: RTCSessionDescriptionInit;
   candidate?: RTCIceCandidateInit;
 };
+
+// Deterministic: lower userId sends the WebRTC offer (kills offer glare)
+function shouldOfferTo(myId: string, peerId: string): boolean {
+  return myId < peerId;
+}
+
+// Two people calling at once → higher creator yields to lower creator
+function shouldYieldCall(
+  myCreator: string,
+  myCallId: string,
+  theirCreator: string,
+  theirCallId: string
+): boolean {
+  if (theirCreator !== myCreator) return theirCreator < myCreator;
+  return theirCallId < myCallId;
+}
 
 // Translate getUserMedia failures into clear, actionable messages
 export function mediaErrorMessage(err: unknown, video: boolean): string {
@@ -104,6 +121,7 @@ export function useCall(userId: string | null) {
   const [joinableCalls, setJoinableCalls] = useState<CallRow[]>([]);
 
   const statusRef = useRef<CallStatus>("idle");
+  const enterCallRef = useRef<(callId: string, video: boolean) => Promise<void>>(async () => {});
   const userIdRef = useRef<string | null>(userId);
   const callIdRef = useRef<string | null>(null);
   const incomingRef = useRef<IncomingCall | null>(null);
@@ -244,7 +262,7 @@ export function useCall(userId: string | null) {
         } catch {}
       });
 
-      // perfect negotiation: impolite peer (lower userId) rejects colliding offers
+      // Renegotiation path (screen share / track change) — always allowed
       pc.onnegotiationneeded = async () => {
         if (makingOfferRef.current.has(peerId)) return;
         try {
@@ -271,16 +289,71 @@ export function useCall(userId: string | null) {
           stream.addTrack(e.track);
         }
         publishRemotes();
+        setStatus((s) => (s === "calling" || s === "incoming" ? "connected" : s));
       };
 
       pc.onicecandidate = (e) => {
         if (e.candidate) send({ to: peerId, kind: "ice", candidate: e.candidate.toJSON() });
       };
 
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "connected") {
+          setStatus((s) => (s === "calling" || s === "incoming" ? "connected" : s));
+        }
+      };
+
       pcsRef.current.set(peerId, pc);
+      // If we're already screen-sharing when this peer connects, send the screen track
+      const scr = screenRef.current?.getVideoTracks()[0];
+      if (scr) {
+        const vs = pc.getSenders().find((s) => s.track?.kind === "video");
+        if (vs) {
+          void vs.replaceTrack(scr).catch(() => undefined);
+        } else {
+          try {
+            pc.addTrack(scr, screenRef.current as MediaStream);
+          } catch {}
+        }
+      }
       return pc;
     },
     [publishRemotes, send]
+  );
+
+  const makeOffer = useCallback(
+    async (peerId: string) => {
+      const pc = pcsRef.current.get(peerId);
+      if (!pc) return;
+      if (makingOfferRef.current.has(peerId)) return;
+      if (pc.signalingState !== "stable") return;
+      try {
+        makingOfferRef.current.add(peerId);
+        const offer = await pc.createOffer();
+        if (pc.signalingState !== "stable") return;
+        await pc.setLocalDescription(offer);
+        send({ to: peerId, kind: "offer", sdp: pc.localDescription });
+      } catch {
+      } finally {
+        makingOfferRef.current.delete(peerId);
+      }
+    },
+    [send]
+  );
+
+  // Only the lower userId creates the initial peer+offer — no double-offer glare
+  const discoverPeer = useCallback(
+    (peerId: string) => {
+      const me = userIdRef.current;
+      if (!me || !peerId || peerId === me || !localRef.current) return;
+      if (!shouldOfferTo(me, peerId)) {
+        // Higher id waits — only nudge the lower id to (re)send the offer
+        send({ to: peerId, kind: "hello" });
+        return;
+      }
+      if (!pcsRef.current.has(peerId)) createPeer(peerId);
+      void makeOffer(peerId);
+    },
+    [createPeer, makeOffer, send]
   );
 
   const drainIce = useCallback(async (peerId: string) => {
@@ -302,6 +375,15 @@ export function useCall(userId: string | null) {
       const from = payload.from;
       if (!from || from === userIdRef.current) return;
 
+      if (payload.kind === "hello") {
+        // Peer is waiting for our offer
+        if (shouldOfferTo(userIdRef.current, from)) {
+          if (!pcsRef.current.has(from)) createPeer(from);
+          void makeOffer(from);
+        }
+        return;
+      }
+
       if (payload.kind === "ice") {
         if (!payload.candidate) return;
         const pc = pcsRef.current.get(from);
@@ -319,17 +401,21 @@ export function useCall(userId: string | null) {
 
       if (payload.kind === "offer") {
         if (!payload.sdp) return;
-        const pc = createPeer(from);
+        const pc = pcsRef.current.get(from) ?? createPeer(from);
         if (!pc) return;
-        const polite = (userIdRef.current ?? "") > from;
-        if (makingOfferRef.current.has(from) && !polite) return;
         try {
+          // Perfect negotiation: polite (higher id) rolls back own offer on collision
+          if (pc.signalingState !== "stable") {
+            const polite = (userIdRef.current ?? "") > from;
+            if (!polite) return;
+            await pc.setLocalDescription({ type: "rollback" });
+          }
           await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
           await drainIce(from);
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
           send({ to: from, kind: "answer", sdp: pc.localDescription });
-          if (callIdRef.current) void setCallActive(callIdRef.current);
+          if (callIdRef.current) void setCallActive(callIdRef.current).catch(() => undefined);
           setStatus((s) => (s === "calling" || s === "incoming" || s === "connected" ? "connected" : s));
         } catch {}
         return;
@@ -342,12 +428,12 @@ export function useCall(userId: string | null) {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
           await drainIce(from);
-          if (callIdRef.current) void setCallActive(callIdRef.current);
+          if (callIdRef.current) void setCallActive(callIdRef.current).catch(() => undefined);
           setStatus((s) => (s === "calling" || s === "incoming" || s === "connected" ? "connected" : s));
         } catch {}
       }
     },
-    [createPeer, drainIce, send]
+    [createPeer, drainIce, makeOffer, send]
   );
 
   const localCleanup = useCallback(() => {
@@ -387,6 +473,7 @@ export function useCall(userId: string | null) {
     sharersRef.current.clear();
     publishRemotes();
     setLocalStream(null);
+    statusRef.current = "idle";
     setStatus("idle");
     setIncoming(null);
     setIncomingVideo(false);
@@ -430,6 +517,14 @@ export function useCall(userId: string | null) {
         }
       });
 
+      // Peer accepted — stop our invite ring for them (kills "another call" reopen)
+      ch.on("broadcast", { event: "joined" }, ({ payload }) => {
+        const p = payload as { from?: string; callId?: string };
+        if (p?.from && p.from !== userIdRef.current && p.callId) {
+          removeInvitee(p.callId, p.from);
+        }
+      });
+
       // Presence: discover peers even when call_members table is missing
       ch.on("presence", { event: "sync" }, () => {
         const state = ch.presenceState();
@@ -440,9 +535,7 @@ export function useCall(userId: string | null) {
             if (e?.userId && e.userId !== userIdRef.current) seen.add(e.userId);
           }
         }
-        seen.forEach((id) => {
-          if (localRef.current && !pcsRef.current.has(id)) createPeer(id);
-        });
+        seen.forEach((id) => discoverPeer(id));
       });
 
       callChannelRef.current = ch;
@@ -461,7 +554,7 @@ export function useCall(userId: string | null) {
         });
       });
     },
-    [closePeer, createPeer, handleSig, localCleanup]
+    [closePeer, discoverPeer, handleSig, localCleanup]
   );
 
   const loadOpenCalls = useCallback(
@@ -499,6 +592,7 @@ export function useCall(userId: string | null) {
         });
         setIncomingVideo(inv.call.with_video);
         setCallerRingtone(inv.call.ringtone);
+        statusRef.current = "incoming";
         setStatus("incoming");
       }
     },
@@ -549,7 +643,36 @@ export function useCall(userId: string | null) {
         ];
       });
 
-      if (statusRef.current === "calling" || statusRef.current === "connected") return;
+      // Two people calling each other at once — yield to the winner (no dual-call deadlock)
+      if (statusRef.current === "calling" || statusRef.current === "connected") {
+        const myCall = callIdRef.current;
+        if (myCall && inv.callId !== myCall) {
+          const myCreator = lastCallRowRef.current?.created_by ?? userId;
+          if (shouldYieldCall(myCreator, myCall, inv.callerId, inv.callId)) {
+            void setMemberState(myCall, userId, "left").catch(() => undefined);
+            stopInviteRing(myCall);
+            stopRoomAnnounce(myCall, true);
+            broadcastInviteCancel(myCall, userId);
+            localCleanup();
+            peerIdRef.current = inv.callerId;
+            lastCallRowRef.current = {
+              id: inv.callId,
+              kind: inv.kind,
+              peer_id: inv.peerId,
+              created_by: inv.callerId,
+              with_video: inv.withVideo,
+              ringtone: inv.ringtone,
+              status: "active",
+              created_at: new Date().toISOString(),
+              ended_at: null,
+            };
+            void enterCallRef.current(inv.callId, inv.withVideo).catch(() => undefined);
+            return;
+          }
+          broadcastInviteDeclined(inv.callId, userId, inv.callerId);
+        }
+        return;
+      }
       if (statusRef.current === "incoming" && incomingRef.current?.callId === inv.callId) return;
       // Already showing a different incoming call — don't thrash the UI
       if (statusRef.current === "incoming" && incomingRef.current) return;
@@ -561,6 +684,7 @@ export function useCall(userId: string | null) {
       });
       setIncomingVideo(inv.withVideo);
       setCallerRingtone(inv.ringtone);
+      statusRef.current = "incoming";
       setStatus("incoming");
     };
 
@@ -570,7 +694,10 @@ export function useCall(userId: string | null) {
         stopRingtone();
         setIncoming(null);
         setIncomingVideo(false);
-        if (statusRef.current === "incoming") setStatus("idle");
+        if (statusRef.current === "incoming") {
+          statusRef.current = "idle";
+          setStatus("idle");
+        }
       }
     };
 
@@ -589,7 +716,10 @@ export function useCall(userId: string | null) {
         stopRingtone();
         setIncoming(null);
         setIncomingVideo(false);
-        if (statusRef.current === "incoming") setStatus("idle");
+        if (statusRef.current === "incoming") {
+          statusRef.current = "idle";
+          setStatus("idle");
+        }
       }
     };
 
@@ -654,6 +784,7 @@ export function useCall(userId: string | null) {
         callStartedAtRef.current = Date.now();
         setIncoming(null);
         setIncomingVideo(false);
+        statusRef.current = "calling";
         setStatus("calling");
         setSharingScreen(false);
         setPeerSharingScreen(false);
@@ -665,6 +796,13 @@ export function useCall(userId: string | null) {
         void setMemberState(callId, userId, "joined").catch(() => undefined);
         void setCallActive(callId).catch(() => undefined);
         await joined;
+        try {
+          callChannelRef.current?.send({
+            type: "broadcast",
+            event: "joined",
+            payload: { from: userId, callId },
+          });
+        } catch {}
         void logCallEvent(`${video ? "Video" : "Audio"} call started`, peerIdRef.current);
 
         const announceRow: CallRow =
@@ -685,7 +823,7 @@ export function useCall(userId: string | null) {
 
         void getJoinedPeers(callId, userId)
           .then((peers) => {
-            peers.forEach((p) => createPeer(p));
+            peers.forEach((p) => discoverPeer(p));
           })
           .catch(() => undefined);
         setJoinableCalls((prev) => prev.filter((c) => c.id !== callId));
@@ -693,8 +831,10 @@ export function useCall(userId: string | null) {
         enteringRef.current = false;
       }
     },
-    [createPeer, joinChannel, localCleanup, logCallEvent, userId]
+    [discoverPeer, joinChannel, localCleanup, logCallEvent, userId]
   );
+
+  enterCallRef.current = enterCall;
 
   const startDmCall = useCallback(
     async (peerId: string, video: boolean) => {
@@ -749,6 +889,7 @@ export function useCall(userId: string | null) {
     const id = incoming.callId;
     setIncoming(null);
     setIncomingVideo(false);
+    statusRef.current = "calling";
     setStatus("calling");
     stopRingtone();
     return enterCall(id, incoming.withVideo);
@@ -856,7 +997,7 @@ export function useCall(userId: string | null) {
   }, []);
 
   const shareScreen = useCallback(async () => {
-    if (!localRef.current || pcsRef.current.size === 0) return;
+    if (!localRef.current) return;
     try {
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
         video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -895,6 +1036,30 @@ export function useCall(userId: string | null) {
       void stopScreenShare();
     }
   }, [stopScreenShare]);
+
+  // Heal signaling: if still waiting for remote media, re-discover peers
+  useEffect(() => {
+    if (status !== "calling" && status !== "connected") return;
+    if (!userId) return;
+    const t = window.setInterval(() => {
+      if (remoteRef.current.size > 0) return;
+      const callId = callIdRef.current;
+      if (!callId || !localRef.current) return;
+      void getJoinedPeers(callId, userId)
+        .then((peers) => peers.forEach((p) => discoverPeer(p)))
+        .catch(() => undefined);
+      const ch = callChannelRef.current;
+      if (ch) {
+        const state = ch.presenceState() as Record<string, { userId?: string }[]>;
+        for (const key of Object.keys(state)) {
+          for (const e of state[key] ?? []) {
+            if (e?.userId && e.userId !== userId) discoverPeer(e.userId);
+          }
+        }
+      }
+    }, 2500);
+    return () => window.clearInterval(t);
+  }, [status, userId, discoverPeer]);
 
   // unmount: best-effort leave so the room doesn't stay ghost-joined
   useEffect(() => {
