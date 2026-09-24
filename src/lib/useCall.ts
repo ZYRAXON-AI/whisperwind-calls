@@ -200,48 +200,93 @@ export function useCall(userId: string | null) {
     setCamOn(t.enabled);
   }, []);
 
+  const renegotiate = useCallback(async () => {
+    const pc = pcRef.current;
+    if (!pc) return;
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      send("renegotiate", { from: userId, sdp: offer });
+    } catch (e) {
+      console.warn("Renegotiation error", e);
+    }
+  }, [send, userId]);
+
   const stopScreenShare = useCallback(async () => {
     const pc = pcRef.current;
     screenRef.current?.getTracks().forEach((t) => t.stop());
     screenRef.current = null;
     setSharingScreen(false);
 
-    const sender = pc?.getSenders().find((s) => s.track?.kind === "video");
-    if (sender) {
-      await sender.replaceTrack(camTrackRef.current ?? null);
+    let videoSender = pc?.getSenders().find((s) => s.track?.kind === "video");
+    if (!videoSender && pc) {
+      const vt = pc.getTransceivers().find(
+        (t) => t.receiver.track.kind === "video" || t.sender.track?.kind === "video"
+      );
+      if (vt) videoSender = vt.sender;
     }
+
+    if (videoSender) {
+      await videoSender.replaceTrack(camTrackRef.current ?? null);
+    }
+
+    if (localRef.current) {
+      setLocalStream(localRef.current);
+    }
+
     send("screen_status", { from: userId, sharing: false });
-  }, [send, userId]);
+    await renegotiate();
+  }, [renegotiate, send, userId]);
 
   const shareScreen = useCallback(async () => {
     const pc = pcRef.current;
     if (!pc) return;
 
     if (!navigator.mediaDevices?.getDisplayMedia) {
-      alert("Screen sharing is not supported on this device. Please use Chrome on Desktop or Android.");
+      alert("Screen sharing is not supported on this browser or device. Please use Chrome on Desktop or Android.");
       return;
     }
 
     try {
-      const display = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 60, max: 60 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: true,
-      });
+      let display: MediaStream;
+      try {
+        display = await navigator.mediaDevices.getDisplayMedia({
+          video: { cursor: "always" } as MediaTrackConstraints,
+          audio: false,
+        });
+      } catch {
+        display = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      }
 
       screenRef.current = display;
       const track = display.getVideoTracks()[0];
       if (!track) return;
       track.contentHint = "detail";
 
-      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-      if (sender) {
-        await sender.replaceTrack(track);
+      let videoSender = pc.getSenders().find((s) => s.track?.kind === "video");
+      if (!videoSender) {
+        const vt = pc.getTransceivers().find(
+          (t) => t.receiver.track.kind === "video" || t.sender.track?.kind === "video"
+        );
+        if (vt) {
+          videoSender = vt.sender;
+          vt.direction = "sendrecv";
+        }
+      }
+
+      if (videoSender) {
+        await videoSender.replaceTrack(track);
       } else {
         pc.addTrack(track, display);
       }
 
+      // Show the shared screen in local preview so the user sees what is being shared
+      setLocalStream(display);
+      setWithVideo(true);
       setSharingScreen(true);
       send("screen_status", { from: userId, sharing: true });
+
+      await renegotiate();
 
       track.onended = () => {
         void stopScreenShare();
@@ -249,9 +294,9 @@ export function useCall(userId: string | null) {
     } catch {
       // User cancelled picker
     }
-  }, [send, stopScreenShare, userId]);
+  }, [renegotiate, send, stopScreenShare, userId]);
 
-  // রিয়েল-টাইম চ্যানেল (এখানে status রি-ট্রিগার বন্ধ করা হয়েছে)
+  // Realtime signaling channel
   useEffect(() => {
     if (!userId) return;
     const channel = supabase.channel("zyraxon-room", { config: { broadcast: { self: false } } });
@@ -280,6 +325,26 @@ export function useCall(userId: string | null) {
       })
       .on("broadcast", { event: "screen_status" }, ({ payload }) => {
         setPeerSharingScreen(Boolean(payload.sharing));
+        if (payload.sharing) setWithVideo(true);
+      })
+      .on("broadcast", { event: "renegotiate" }, async ({ payload }) => {
+        if (!pcRef.current) return;
+        try {
+          await pcRef.current.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+          const answer = await pcRef.current.createAnswer();
+          await pcRef.current.setLocalDescription(answer);
+          send("renegotiate-answer", { from: userId, sdp: answer });
+        } catch (e) {
+          console.warn("Error answering renegotiation", e);
+        }
+      })
+      .on("broadcast", { event: "renegotiate-answer" }, async ({ payload }) => {
+        if (!pcRef.current) return;
+        try {
+          await pcRef.current.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+        } catch (e) {
+          console.warn("Error setting renegotiated remote description", e);
+        }
       })
       .on("broadcast", { event: "hangup" }, () => {
         cleanup();
@@ -291,7 +356,7 @@ export function useCall(userId: string | null) {
       supabase.removeChannel(channel);
       cleanup();
     };
-  }, [cleanup, userId]);
+  }, [cleanup, send, userId]);
 
   return {
     status,
