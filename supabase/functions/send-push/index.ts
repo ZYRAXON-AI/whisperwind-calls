@@ -29,6 +29,7 @@ Deno.serve(async (req) => {
       title?: string;
       body?: string;
       tag?: string;
+      vibrate?: number[] | number;
     };
     const sub = payload.subscription;
     if (!sub?.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) {
@@ -46,6 +47,7 @@ Deno.serve(async (req) => {
         title: payload.title || "Whisperwind",
         body: payload.body || "",
         tag: payload.tag || "whisperwind",
+        vibrate: payload.vibrate ?? [500, 200, 500, 200, 700],
         requireInteraction: true,
       })
     );

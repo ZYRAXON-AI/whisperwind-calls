@@ -51,7 +51,8 @@ export async function pushNotify(
   toUserId: string | null,
   title: string,
   body: string,
-  tag?: string
+  tag?: string,
+  vibrate?: number[] | number
 ): Promise<void> {
   try {
     if (!toUserId) return;
@@ -78,6 +79,7 @@ export async function pushNotify(
         title,
         body,
         tag,
+        vibrate,
       },
     });
   } catch {}

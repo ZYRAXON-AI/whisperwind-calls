@@ -85,8 +85,27 @@ function Unlock() {
           },
         });
         if (signUpRes.error) {
-          toast.error(signUpRes.error.message);
-          return;
+          // Already-registered user with a valid password — just sign in.
+          const retried = await supabase.auth.signInWithPassword({
+            email: syntheticEmail,
+            password: guestPassword,
+          });
+          if (retried.error) {
+            toast.error("This username is taken or the password is wrong.");
+            return;
+          }
+          authRes = retried;
+        } else if (!signUpRes.data.session) {
+          // User created but no session issued yet — wait a beat and sign in.
+          await new Promise((r) => setTimeout(r, 600));
+          authRes = await supabase.auth.signInWithPassword({
+            email: syntheticEmail,
+            password: guestPassword,
+          });
+          if (authRes.error) {
+            toast.error(authRes.error.message);
+            return;
+          }
         }
       }
 

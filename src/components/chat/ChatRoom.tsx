@@ -30,6 +30,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { signedUrl } from "@/lib/media";
 import {
   type Friendship,
+  type Message,
   type Profile,
   type View,
   friendIdsOf,
@@ -55,6 +56,11 @@ export function ChatRoom({
   onSignOut: () => void;
 }) {
   const [view, setView] = useState<View>({ type: "group" });
+  // The chat thread that is currently mounted. It only changes when the user
+  // actually opens the group lounge or a DM — switching to YouTube / Friends /
+  // Profile keeps it intact so Conversation never reloads its history.
+  const [chatThread, setChatThread] = useState<{ peerId: string | null }>({ peerId: null });
+  const [unread, setUnread] = useState<Record<string, number>>({});
   const [profiles, setProfiles] = useState<Record<string, Profile>>({});
   const [friendships, setFriendships] = useState<Friendship[]>([]);
   const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(new Set());
@@ -65,6 +71,11 @@ export function ChatRoom({
   const [installPrompt, setInstallPrompt] = useState<any>(null);
 
   const call = useCall(user.id);
+
+  const viewRef = useRef(view);
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
 
   useEffect(() => {
     const handleBeforeInstall = (e: Event) => {
@@ -173,6 +184,31 @@ export function ChatRoom({
     };
   }, [loadProfiles, loadFriendships, user.id]);
 
+  // Unread badge counting for EVERY thread — works even while another chat is open.
+  // Messages for the thread that is currently on screen are ignored (Conversation
+  // clears those via onUnread(…, 0)).
+  useEffect(() => {
+    if (!user.id) return;
+    const ch = supabase
+      .channel("zyraxon-unread")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (payload) => {
+        const m = payload.new as Message | undefined;
+        if (!m || m.kind === "push_sub" || m.sender_id === user.id) return;
+        const isGroup = m.recipient_id === null;
+        const isDmToMe = m.recipient_id === user.id;
+        if (!isGroup && !isDmToMe) return;
+        const key = isGroup ? "group" : m.sender_id;
+        const onScreen =
+          viewRef.current.type === "group" || (viewRef.current.type === "dm" && viewRef.current.peerId === m.sender_id);
+        if (onScreen) return;
+        setUnread((prev) => ({ ...prev, [key]: (prev[key] ?? 0) + 1 }));
+      })
+      .subscribe();
+    return () => {
+      supabase.removeChannel(ch);
+    };
+  }, [user.id]);
+
   // Ringing on BOTH sides:
   //  • callee hears the CALLER's chosen ringtone (invite carries it)
   //  • caller hears the CALLEE's ringtone (sent back via ring_back; own tone until it arrives)
@@ -265,8 +301,23 @@ export function ChatRoom({
   const go = (v: View) => {
     unlockSound();
     setView(v);
+    if (v.type === "group") setChatThread({ peerId: null });
+    else if (v.type === "dm") setChatThread({ peerId: v.peerId });
     setNavOpen(false);
   };
+
+  const handleUnread = useCallback((threadKey: string, delta: number) => {
+    setUnread((prev) => {
+      const cur = prev[threadKey] ?? 0;
+      const next = delta === 0 ? 0 : cur + delta;
+      if (next <= 0) {
+        const rest = { ...prev };
+        delete rest[threadKey];
+        return rest;
+      }
+      return { ...prev, [threadKey]: next };
+    });
+  }, []);
 
   const navItem = (active: boolean) =>
     `flex items-center gap-3 rounded-2xl px-3.5 py-2.5 text-sm font-medium transition ${
@@ -353,6 +404,11 @@ export function ChatRoom({
         <nav className="flex flex-col gap-1">
           <button type="button" className={navItem(view.type === "group")} onClick={() => go({ type: "group" })}>
             <Users className="h-4 w-4" /> Global Lounge
+            {(unread["group"] ?? 0) > 0 && (
+              <span className="ml-auto grid h-5 min-w-5 place-items-center rounded-full bg-primary px-1.5 text-[11px] font-semibold text-primary-foreground">
+                {unread["group"]}
+              </span>
+            )}
           </button>
           <button type="button" className={navItem(view.type === "friends")} onClick={() => go({ type: "friends" })}>
             <UserPlus className="h-4 w-4" /> Add Friends
@@ -417,6 +473,11 @@ export function ChatRoom({
                     <p className="truncate text-sm font-medium">{f.display_name}</p>
                     <p className="text-[11px] text-muted-foreground">{friendOnline ? "Online" : "Offline"}</p>
                   </div>
+                  {(unread[f.id] ?? 0) > 0 && (
+                    <span className="grid h-5 min-w-5 place-items-center rounded-full bg-primary px-1.5 text-[11px] font-semibold text-primary-foreground">
+                      {unread[f.id]}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -540,9 +601,10 @@ export function ChatRoom({
           >
             <Conversation
               me={user.id}
-              peerId={view.type === "dm" ? view.peerId : null}
+              peerId={chatThread.peerId}
               profiles={profiles}
               active={view.type === "group" || view.type === "dm"}
+              onUnread={handleUnread}
               onOpenProfile={(id) => go({ type: "profile", userId: id })}
             />
           </div>

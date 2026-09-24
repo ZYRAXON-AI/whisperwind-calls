@@ -2,6 +2,7 @@
 let ctx: AudioContext | null = null;
 let ringTimer: ReturnType<typeof setInterval> | null = null;
 let previewTimer: ReturnType<typeof setTimeout> | null = null;
+let activeRingtone = "";
 // YouTube ringtone (yt:VIDEOID) plays via a hidden looping audio iframe
 const ytFrames = new Set<HTMLIFrameElement>();
 
@@ -214,12 +215,22 @@ export function startRingtone(presetId?: string) {
 
   const tune = RINGTONE_PRESETS.find((p) => p.id === id) || RINGTONE_PRESETS[0];
 
-  tune.play();
-  ringTimer = setInterval(() => {
+  const keepAlive = () => {
     const cc = audio();
-    if (cc && cc.state === "suspended") void cc.resume();
+    if (cc && cc.state === "suspended") {
+      // Resume then replay once so a locked/suspended AudioContext still rings
+      cc.resume()
+        .then(() => {
+          if (ringTimer) tune.play();
+        })
+        .catch(() => undefined);
+      return;
+    }
     tune.play();
-  }, 1800);
+  };
+
+  tune.play();
+  ringTimer = setInterval(keepAlive, 1800);
 }
 
 export function stopRingtone() {

@@ -125,6 +125,8 @@ function SignIn({ onLock, onLoggedIn }: { onLock: () => Promise<void>; onLoggedI
         password: guestPass,
       });
 
+      // Fresh guest: create the account, then make sure we hold a live session
+      // (Supabase may not auto-issue one right after signUp).
       if (authRes.error) {
         const signUpRes = await supabase.auth.signUp({
           email,
@@ -134,8 +136,25 @@ function SignIn({ onLock, onLoggedIn }: { onLock: () => Promise<void>; onLoggedI
           },
         });
         if (signUpRes.error) {
-          toast.error(signUpRes.error.message);
-          return;
+          // Account already exists but the password didn't match — try once more.
+          if (signUpRes.error.message.toLowerCase().includes("already") || signUpRes.error.status === 422) {
+            authRes = await supabase.auth.signInWithPassword({ email, password: guestPass });
+            if (authRes.error) {
+              toast.error("This username is taken or the password is wrong.");
+              return;
+            }
+          } else {
+            toast.error(signUpRes.error.message);
+            return;
+          }
+        } else if (!signUpRes.data.session) {
+          // User created but no session issued yet — wait a beat and sign in.
+          await new Promise((r) => setTimeout(r, 600));
+          authRes = await supabase.auth.signInWithPassword({ email, password: guestPass });
+          if (authRes.error) {
+            toast.error(authRes.error.message);
+            return;
+          }
         }
       }
 

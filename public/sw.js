@@ -35,6 +35,7 @@ self.addEventListener("push", (event) => {
       badge: "/favicon.ico",
       tag: data.tag || "whisperwind",
       renotify: true,
+      vibrate: data.vibrate || [500, 200, 500, 200, 700],
       requireInteraction: data.requireInteraction === true,
     })
   );
@@ -51,6 +52,7 @@ self.addEventListener("message", (event) => {
       badge: "/favicon.ico",
       tag: data.tag || "zyraxon",
       renotify: true,
+      vibrate: data.vibrate || [180, 90, 180],
       requireInteraction: data.requireInteraction === true,
     })
   );

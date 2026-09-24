@@ -1050,6 +1050,14 @@ export function useCall(userId: string | null) {
         withVideo: video,
       });
       if (!call) throw new Error("Could not create the call room — server error. Please try again.");
+      // Web Push to the other side — rings even when their tab is closed/backgrounded
+      void pushNotify(
+        peerId,
+        "Whisperwind",
+        `Incoming ${video ? "video" : "audio"} call — answer now`,
+        `call-${call.id}`,
+        [500, 200, 500, 200, 700]
+      );
       lastCallRowRef.current = call;
       await enterCall(call.id, video);
     },
@@ -1074,6 +1082,16 @@ export function useCall(userId: string | null) {
         withVideo: video,
       });
       if (!call) throw new Error("Could not create the call room — server error. Please try again.");
+      // Ring every invitee even when their Phone tab is closed/backgrounded
+      for (const id of inviteeIds) {
+        void pushNotify(
+          id,
+          "Whisperwind",
+          `You are invited to a ${video ? "video" : "audio"} call — join now`,
+          `call-${call.id}`,
+          [500, 200, 500, 200, 700]
+        );
+      }
       lastCallRowRef.current = call;
       await enterCall(call.id, video);
     },

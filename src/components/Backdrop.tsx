@@ -50,9 +50,7 @@ export function Backdrop() {
           }`}
         />
       ))}
-      {/* Light veil — pictures stay clearly visible */}
-      <div className="absolute inset-0 bg-background/55" />
-      <div className="absolute -left-40 top-[-10%] h-[36rem] w-[36rem] rounded-full bg-primary/25 blur-[140px]" />
+      <div className="absolute -left-40 top-[-10%] h-[36rem] w-[36rem] rounded-full bg-primary/15 blur-[140px]" />
       <div className="absolute -right-32 bottom-[-15%] h-[34rem] w-[34rem] rounded-full bg-accent/25 blur-[150px]" />
     </div>
   );

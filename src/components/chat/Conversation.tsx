@@ -28,12 +28,14 @@ export function Conversation({
   profiles,
   onOpenProfile,
   active = true,
+  onUnread,
 }: {
   me: string;
   peerId: string | null;
   profiles: Record<string, Profile> | Profile[];
   onOpenProfile: (id: string) => void;
   active?: boolean;
+  onUnread?: (threadKey: string, delta: number) => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [sending, setSending] = useState(false);
@@ -42,11 +44,16 @@ export function Conversation({
 
   const [isPeerTyping, setIsPeerTyping] = useState(false);
   const [peerSeenMsgId, setPeerSeenMsgId] = useState<string | null>(null);
+  const [seenReaders, setSeenReaders] = useState<Record<string, string[]>>({});
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTypingSentRef = useRef<number>(0);
   const channelRef = useRef<any>(null);
   const activeRef = useRef(active);
   activeRef.current = active;
+  const onUnreadRef = useRef(onUnread);
+  onUnreadRef.current = onUnread;
+  const threadKeyRef = useRef(peerId ?? "group");
+  threadKeyRef.current = peerId ?? "group";
 
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -170,6 +177,11 @@ export function Conversation({
       .on("broadcast", { event: "message_seen" }, ({ payload }) => {
         if (payload.readerId !== me && payload.messageId) {
           setPeerSeenMsgId(payload.messageId);
+          setSeenReaders((prev) => {
+            const readers = prev[payload.messageId] ?? [];
+            if (readers.includes(payload.readerId)) return prev;
+            return { ...prev, [payload.messageId]: [...readers, payload.readerId] };
+          });
         }
       })
       .subscribe();
@@ -182,17 +194,24 @@ export function Conversation({
     };
   }, [handleIncoming, me, peerId]);
 
+  // Tell the peers which message I have read — only while this thread is active,
+  // so the "seen" badge stays honest. Works for both DMs (peerId) and the group.
   useEffect(() => {
-    if (!messages.length || !peerId || !channelRef.current) return;
+    if (!active || !messages.length || !channelRef.current) return;
     const lastMsg = messages[messages.length - 1];
-    if (lastMsg && lastMsg.sender_id === peerId) {
+    if (lastMsg && lastMsg.sender_id !== me) {
       channelRef.current.send({
         type: "broadcast",
         event: "message_seen",
         payload: { readerId: me, messageId: lastMsg.id },
       });
     }
-  }, [messages, peerId, me]);
+  }, [messages, active, me]);
+
+  // Clear the unread badge as soon as this thread is brought to the front.
+  useEffect(() => {
+    if (active) onUnreadRef.current?.(threadKeyRef.current, 0);
+  }, [active, peerId]);
 
   useEffect(() => {
     if (!active) return;
@@ -331,9 +350,13 @@ export function Conversation({
           const author = profileMap[m.sender_id];
           const isSeenTarget =
             m.mine &&
-            peerId &&
             lastMineMsg?.id === m.id &&
-            (peerSeenMsgId === m.id || peerSeenMsgId !== null);
+            (peerId ? peerSeenMsgId === m.id : (seenReaders[m.id]?.length ?? 0) > 0);
+          const readers = peerId
+            ? isSeenTarget && peerProfile
+              ? [peerId]
+              : []
+            : (seenReaders[m.id] ?? []).slice(0, 4);
 
           return (
             <div key={m.id} className="flex flex-col">
@@ -423,11 +446,31 @@ export function Conversation({
                 </div>
               </div>
 
-              {isSeenTarget && peerProfile && (
+              {isSeenTarget && peerProfile && peerId && (
                 <div className="mr-10 mt-1 flex items-center justify-end gap-1.5">
                   <span className="text-[10px] text-muted-foreground">Seen</span>
                   <div className="h-4 w-4 overflow-hidden rounded-full ring-1 ring-primary/40">
                     <Avatar profile={peerProfile} className="h-full w-full text-[8px]" />
+                  </div>
+                </div>
+              )}
+
+              {m.mine && !peerId && readers.length > 0 && (
+                <div className="mr-10 mt-1 flex items-center justify-end gap-1">
+                  <span className="text-[10px] text-muted-foreground">
+                    {readers.length > 1 ? `Seen by ${readers.length}` : "Seen"}
+                  </span>
+                  <div className="flex">
+                    {readers.map((rid) => (
+                      <button
+                        key={rid}
+                        type="button"
+                        onClick={() => onOpenProfile(rid)}
+                        className="-ml-1.5 h-4 w-4 overflow-hidden rounded-full ring-2 ring-background first:ml-0"
+                      >
+                        <Avatar profile={profileMap[rid]} className="h-full w-full text-[8px]" />
+                      </button>
+                    ))}
                   </div>
                 </div>
               )}
