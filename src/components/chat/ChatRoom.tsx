@@ -7,6 +7,7 @@ import {
   LogOut,
   Menu,
   Phone,
+  PhoneCall,
   Play,
   Settings,
   UserPlus,
@@ -213,6 +214,23 @@ export function ChatRoom({
   const peer = view.type === "dm" ? profiles[view.peerId] : null;
   const isPeerOnline = view.type === "dm" && view.peerId ? onlineUserIds.has(view.peerId) : onlineUserIds.size > 1;
 
+  // DM হলে ওই ব্যক্তিকে, নাহলে সব ফ্রেন্ডকে ইনভাইট করে গ্রুপ কল রুম
+  const startCall = (video: boolean) => {
+    unlockSound();
+    const run =
+      view.type === "dm"
+        ? call.startDmCall(view.peerId, video)
+        : call.startGroupCall(friendIds, video);
+    void run.catch(() => toast.error(video ? "Camera blocked" : "Microphone blocked"));
+  };
+
+  const joinFirstCall = () => {
+    const target = call.joinableCalls[0];
+    if (!target) return;
+    unlockSound();
+    void call.joinCall(target.id).catch(() => toast.error("কলে যোগ দেওয়া যায়নি"));
+  };
+
   const headerTitle =
     view.type === "dm"
       ? peer?.display_name ?? "Direct Message"
@@ -402,10 +420,21 @@ export function ChatRoom({
             <Bell className="h-4 w-4" />
           </button>
 
+          {call.joinableCalls.length > 0 && (
+            <button
+              type="button"
+              aria-label="Join call"
+              title="Join ongoing call"
+              onClick={joinFirstCall}
+              className="gradient-romance shrink-0 grid h-10 w-10 place-items-center rounded-full text-primary-foreground shadow ring-2 ring-primary/40 transition hover:scale-105 active:scale-95 animate-pulse"
+            >
+              <PhoneCall className="h-4 w-4" />
+            </button>
+          )}
           <button
             type="button"
             aria-label="Audio call"
-            onClick={() => void call.startCall(false).catch(() => toast.error("Microphone blocked"))}
+            onClick={() => startCall(false)}
             className="glass shrink-0 grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
           >
             <Phone className="h-4 w-4" />
@@ -413,7 +442,7 @@ export function ChatRoom({
           <button
             type="button"
             aria-label="Video call"
-            onClick={() => void call.startCall(true).catch(() => toast.error("Camera blocked"))}
+            onClick={() => startCall(true)}
             className="glass shrink-0 grid h-10 w-10 place-items-center rounded-full transition hover:bg-white/15"
           >
             <VideoIcon className="h-4 w-4" />
@@ -532,8 +561,16 @@ export function ChatRoom({
         </div>
       </div>
 
-      {/* WebRTC Video/Audio Call Panel */}
-      <CallPanel call={call} peerName={peer?.display_name ?? "Someone"} />
+      {/* WebRTC Video/Audio Call Panel — mesh group/dm call */}
+      <CallPanel
+        call={call}
+        peerName={peer?.display_name ?? "Someone"}
+        profiles={profiles}
+        selfProfile={me}
+        callerName={
+          call.incoming ? profiles[call.incoming.callerId]?.display_name ?? peer?.display_name : undefined
+        }
+      />
 
       {/* Ringtone Selection Dialog */}
       <RingtoneDialog open={ringtoneOpen} onOpenChange={setRingtoneOpen} />

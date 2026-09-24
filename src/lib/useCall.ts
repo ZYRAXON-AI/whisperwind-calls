@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
-import { getSavedRingtone } from "@/lib/sounds";
+import {
+  type CallRow,
+  countJoinedMembers,
+  createCall,
+  endCallRoom,
+  fetchMyOpenCalls,
+  getJoinedPeers,
+  setCallActive,
+  setMemberState,
+} from "@/lib/calls";
 
 const ICE: RTCConfiguration = {
   iceServers: [
@@ -12,6 +21,21 @@ const ICE: RTCConfiguration = {
 
 export type CallStatus = "idle" | "calling" | "incoming" | "connected";
 
+export type IncomingCall = {
+  callId: string;
+  callerId: string;
+  withVideo: boolean;
+  ringtone: string;
+};
+
+type SigPayload = {
+  from?: string;
+  to?: string;
+  kind?: string;
+  sdp?: RTCSessionDescriptionInit;
+  candidate?: RTCIceCandidateInit;
+};
+
 export function useCall(userId: string | null) {
   const [status, setStatus] = useState<CallStatus>("idle");
   const [withVideo, setWithVideo] = useState(false);
@@ -20,279 +44,475 @@ export function useCall(userId: string | null) {
   const [camOn, setCamOn] = useState(true);
   const [sharingScreen, setSharingScreen] = useState(false);
   const [peerSharingScreen, setPeerSharingScreen] = useState(false);
-  const [callerRingtone, setCallerRingtone] = useState<string>("classic");
-
+  const [callerRingtone, setCallerRingtone] = useState("classic");
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+  const [incoming, setIncoming] = useState<IncomingCall | null>(null);
+  const [currentCallId, setCurrentCallId] = useState<string | null>(null);
+  const [joinableCalls, setJoinableCalls] = useState<CallRow[]>([]);
 
   const statusRef = useRef<CallStatus>("idle");
-  useEffect(() => {
-    statusRef.current = status;
-  }, [status]);
+  const userIdRef = useRef<string | null>(userId);
+  const callIdRef = useRef<string | null>(null);
 
-  const channelRef = useRef<RealtimeChannel | null>(null);
-  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const remoteRef = useRef<Map<string, MediaStream>>(new Map());
+  const pendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+  const makingOfferRef = useRef<Set<string>>(new Set());
+  const sharersRef = useRef<Set<string>>(new Set());
+  const callChannelRef = useRef<RealtimeChannel | null>(null);
   const localRef = useRef<MediaStream | null>(null);
   const camTrackRef = useRef<MediaStreamTrack | null>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenRef = useRef<MediaStream | null>(null);
-  const pendingOffer = useRef<RTCSessionDescriptionInit | null>(null);
-  const pendingIce = useRef<RTCIceCandidateInit[]>([]);
 
-  const send = useCallback((event: string, payload: Record<string, unknown>) => {
-    channelRef.current?.send({ type: "broadcast", event, payload: { ...payload } });
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+  useEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
+
+  const publishRemotes = useCallback(() => {
+    const obj: Record<string, MediaStream> = {};
+    remoteRef.current.forEach((s, id) => {
+      obj[id] = s;
+    });
+    setRemoteStreams(obj);
   }, []);
 
-  const cleanup = useCallback(() => {
-    pcRef.current?.getSenders().forEach((s) => {
+  const send = useCallback((payload: Record<string, unknown>) => {
+    callChannelRef.current?.send({
+      type: "broadcast",
+      event: "sig",
+      payload: { ...payload, from: userIdRef.current },
+    });
+  }, []);
+
+  const closePeer = useCallback(
+    (peerId: string) => {
+      const pc = pcsRef.current.get(peerId);
+      if (pc) {
+        pc.ontrack = null;
+        pc.onicecandidate = null;
+        pc.onnegotiationneeded = null;
+        try {
+          pc.close();
+        } catch {}
+        pcsRef.current.delete(peerId);
+      }
+      pendingIceRef.current.delete(peerId);
+      makingOfferRef.current.delete(peerId);
+      sharersRef.current.delete(peerId);
+      setPeerSharingScreen(sharersRef.current.size > 0);
+      const remote = remoteRef.current.get(peerId);
+      if (remote) {
+        remote.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {}
+        });
+        remoteRef.current.delete(peerId);
+      }
+      publishRemotes();
+    },
+    [publishRemotes]
+  );
+
+  const createPeer = useCallback(
+    (peerId: string) => {
+      const existing = pcsRef.current.get(peerId);
+      if (existing) return existing;
+      if (!userIdRef.current || !localRef.current) return null;
+
+      const pc = new RTCPeerConnection(ICE);
+      const remote = new MediaStream();
+      remoteRef.current.set(peerId, remote);
+
+      localRef.current.getTracks().forEach((t) => {
+        try {
+          pc.addTrack(t, localRef.current as MediaStream);
+        } catch {}
+      });
+
+      // perfect negotiation: impolite peer (lower userId) rejects colliding offers
+      pc.onnegotiationneeded = async () => {
+        if (makingOfferRef.current.has(peerId)) return;
+        try {
+          makingOfferRef.current.add(peerId);
+          if (pc.signalingState !== "stable") return;
+          const offer = await pc.createOffer();
+          if (pc.signalingState !== "stable") return;
+          await pc.setLocalDescription(offer);
+          send({ to: peerId, kind: "offer", sdp: pc.localDescription });
+        } catch {
+        } finally {
+          makingOfferRef.current.delete(peerId);
+        }
+      };
+
+      pc.ontrack = (e) => {
+        const stream = remoteRef.current.get(peerId) ?? new MediaStream();
+        remoteRef.current.set(peerId, stream);
+        if (e.streams[0]) {
+          e.streams[0].getTracks().forEach((track) => {
+            if (!stream.getTracks().some((x) => x.id === track.id)) stream.addTrack(track);
+          });
+        } else if (e.track) {
+          stream.addTrack(e.track);
+        }
+        publishRemotes();
+      };
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) send({ to: peerId, kind: "ice", candidate: e.candidate.toJSON() });
+      };
+
+      pcsRef.current.set(peerId, pc);
+      return pc;
+    },
+    [publishRemotes, send]
+  );
+
+  const drainIce = useCallback(async (peerId: string) => {
+    const pc = pcsRef.current.get(peerId);
+    if (!pc?.remoteDescription) return;
+    const queue = pendingIceRef.current.get(peerId) ?? [];
+    pendingIceRef.current.delete(peerId);
+    for (const c of queue) {
       try {
-        s.track?.stop();
+        await pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch {}
+    }
+  }, []);
+
+  const handleSig = useCallback(
+    async (payload: SigPayload) => {
+      if (!payload || !userIdRef.current) return;
+      if (payload.to !== userIdRef.current) return;
+      const from = payload.from;
+      if (!from || from === userIdRef.current) return;
+
+      if (payload.kind === "ice") {
+        if (!payload.candidate) return;
+        const pc = pcsRef.current.get(from);
+        if (pc?.remoteDescription) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+          } catch {}
+        } else {
+          const queue = pendingIceRef.current.get(from) ?? [];
+          queue.push(payload.candidate);
+          pendingIceRef.current.set(from, queue);
+        }
+        return;
+      }
+
+      if (payload.kind === "offer") {
+        if (!payload.sdp) return;
+        const pc = createPeer(from);
+        if (!pc) return;
+        const polite = (userIdRef.current ?? "") > from;
+        if (makingOfferRef.current.has(from) && !polite) return;
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+          await drainIce(from);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          send({ to: from, kind: "answer", sdp: pc.localDescription });
+          if (callIdRef.current) void setCallActive(callIdRef.current);
+          setStatus((s) => (s === "calling" || s === "incoming" || s === "connected" ? "connected" : s));
+        } catch {}
+        return;
+      }
+
+      if (payload.kind === "answer") {
+        if (!payload.sdp) return;
+        const pc = pcsRef.current.get(from);
+        if (!pc) return;
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+          await drainIce(from);
+          if (callIdRef.current) void setCallActive(callIdRef.current);
+          setStatus((s) => (s === "calling" || s === "incoming" || s === "connected" ? "connected" : s));
+        } catch {}
+      }
+    },
+    [createPeer, drainIce, send]
+  );
+
+  const localCleanup = useCallback(() => {
+    Array.from(pcsRef.current.keys()).forEach((id) => closePeer(id));
+    const ch = callChannelRef.current;
+    if (ch) {
+      try {
+        ch.send({ type: "broadcast", event: "peer_leave", payload: { from: userIdRef.current } });
+      } catch {}
+      supabase.removeChannel(ch);
+    }
+    callChannelRef.current = null;
+    localRef.current?.getTracks().forEach((t) => {
+      try {
+        t.stop();
       } catch {}
     });
-    pcRef.current?.close();
-    pcRef.current = null;
-
-    localRef.current?.getTracks().forEach((t) => t.stop());
-    screenRef.current?.getTracks().forEach((t) => t.stop());
+    screenRef.current?.getTracks().forEach((t) => {
+      try {
+        t.stop();
+      } catch {}
+    });
     localRef.current = null;
     screenRef.current = null;
     camTrackRef.current = null;
     micTrackRef.current = null;
-    pendingOffer.current = null;
-    pendingIce.current = [];
-
+    callIdRef.current = null;
+    remoteRef.current.clear();
+    pendingIceRef.current.clear();
+    makingOfferRef.current.clear();
+    sharersRef.current.clear();
+    publishRemotes();
     setLocalStream(null);
-    setRemoteStream(null);
     setStatus("idle");
+    setIncoming(null);
+    setIncomingVideo(false);
+    setCurrentCallId(null);
+    setWithVideo(false);
     setSharingScreen(false);
     setPeerSharingScreen(false);
     setMicOn(true);
     setCamOn(true);
-    setCallerRingtone("classic");
-  }, []);
+  }, [closePeer, publishRemotes]);
 
-  const createPeer = useCallback(() => {
-    const pc = new RTCPeerConnection(ICE);
-    const remote = new MediaStream();
-    setRemoteStream(remote);
+  const joinChannel = useCallback(
+    (callId: string): Promise<void> => {
+      const ch = supabase.channel(`call:${callId}`, {
+        config: { broadcast: { self: false } },
+      });
 
-    pc.addTransceiver("audio", { direction: "sendrecv" });
-    pc.addTransceiver("video", { direction: "sendrecv" });
+      ch.on("broadcast", { event: "sig" }, ({ payload }) => {
+        void handleSig(payload as SigPayload);
+      });
 
-    // replaceTrack (সিএম শেয়ার) পরে নতুন offer/createAnswer চক্র দরকার
-    // শুধু established call-এ (setRemoteDescription done) করবো — setup/answer stage এ নয়
-    let makingOffer = false;
-    pc.onnegotiationneeded = async () => {
-      try {
-        if (makingOffer) return;
-        if (statusRef.current !== "connected" || !pc.remoteDescription) return;
-        makingOffer = true;
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        if (userId) send("call_renegotiate", { from: userId, sdp: offer });
-      } catch {
-      } finally {
-        makingOffer = false;
-      }
-    };
+      ch.on("broadcast", { event: "peer_leave" }, ({ payload }) => {
+        const from = (payload as { from?: string })?.from;
+        if (from && from !== userIdRef.current) closePeer(from);
+      });
 
-    pc.ontrack = (e) => {
-      if (e.streams[0]) {
-        e.streams[0].getTracks().forEach((track) => remote.addTrack(track));
-      } else if (e.track) {
-        remote.addTrack(e.track);
-      }
-      setRemoteStream(new MediaStream(remote.getTracks()));
-    };
+      ch.on("broadcast", { event: "screen" }, ({ payload }) => {
+        const p = payload as { from?: string; sharing?: boolean };
+        if (!p.from || p.from === userIdRef.current) return;
+        if (p.sharing) sharersRef.current.add(p.from);
+        else sharersRef.current.delete(p.from);
+        setPeerSharingScreen(sharersRef.current.size > 0);
+      });
 
-    pc.onicecandidate = (e) => {
-      if (e.candidate && userId) {
-        send("ice_candidate", { from: userId, candidate: e.candidate.toJSON() });
-      }
-    };
+      ch.on("broadcast", { event: "call_ended" }, ({ payload }) => {
+        const p = payload as { callId?: string; from?: string };
+        if (p.callId === callIdRef.current && p.from !== userIdRef.current) localCleanup();
+      });
 
-    pcRef.current = pc;
-    return pc;
-  }, [send, userId]);
+      callChannelRef.current = ch;
 
-  useEffect(() => {
-    if (!userId) return;
-    const ch = supabase.channel("zyraxon-webrtc-call", {
-      config: { broadcast: { self: false } },
-    });
+      // offers কেবল channel SUBSCRIBED এর পরে পাঠাও — নাহলে broadcast হারিয়ে যাবে
+      return new Promise((resolve) => {
+        const timer = setTimeout(resolve, 3000);
+        ch.subscribe((st) => {
+          if (st === "SUBSCRIBED") {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+      });
+    },
+    [closePeer, handleSig, localCleanup]
+  );
 
-    ch.on("broadcast", { event: "call_offer" }, async ({ payload }) => {
-      if (payload.from === userId) return;
-      if (statusRef.current !== "idle") {
-        ch.send({ type: "broadcast", event: "call_busy", payload: { from: userId } });
+  const loadOpenCalls = useCallback(
+    async (silentLeave: boolean) => {
+      if (!userId) return;
+      const rows = await fetchMyOpenCalls(userId);
+      if (!rows) return; // network/RLS error — never kick an active call on fetch failure
+      const openIds = new Set(rows.map((r) => r.call.id));
+
+      if (callIdRef.current && !openIds.has(callIdRef.current) && silentLeave) {
+        localCleanup();
         return;
       }
-      setIncomingVideo(Boolean(payload.withVideo));
-      setCallerRingtone((payload.ringtone as string) || "classic");
-      pendingOffer.current = payload.sdp as RTCSessionDescriptionInit;
-      setStatus("incoming");
-    });
 
-    ch.on("broadcast", { event: "call_answer" }, async ({ payload }) => {
-      if (payload.from === userId) return;
-      if (pcRef.current && payload.sdp) {
-        try {
-          await pcRef.current.setRemoteDescription(
-            new RTCSessionDescription(payload.sdp as RTCSessionDescriptionInit)
-          );
-          while (pendingIce.current.length > 0) {
-            const cand = pendingIce.current.shift();
-            if (cand) await pcRef.current.addIceCandidate(new RTCIceCandidate(cand));
-          }
-          setStatus("connected");
-        } catch {}
+      const inv = rows.find(
+        (r) =>
+          r.member.state === "invited" &&
+          r.call.created_by !== userId &&
+          r.call.id !== callIdRef.current
+      );
+      const joinable = rows.filter((r) => r.call.id !== callIdRef.current).map((r) => r.call);
+      setJoinableCalls(joinable);
+
+      if (inv && statusRef.current === "idle") {
+        setIncoming({
+          callId: inv.call.id,
+          callerId: inv.call.created_by,
+          withVideo: inv.call.with_video,
+          ringtone: inv.call.ringtone,
+        });
+        setIncomingVideo(inv.call.with_video);
+        setCallerRingtone(inv.call.ringtone);
+        setStatus("incoming");
+        return;
       }
-    });
-
-    ch.on("broadcast", { event: "ice_candidate" }, async ({ payload }) => {
-      if (payload.from === userId) return;
-      if (!payload.candidate) return;
-      if (pcRef.current?.remoteDescription) {
-        try {
-          await pcRef.current.addIceCandidate(new RTCIceCandidate(payload.candidate as RTCIceCandidateInit));
-        } catch {}
-      } else {
-        pendingIce.current.push(payload.candidate as RTCIceCandidateInit);
+      if (!inv && statusRef.current === "incoming") {
+        setIncoming(null);
+        setIncomingVideo(false);
+        setStatus("idle");
       }
-    });
+    },
+    [localCleanup, userId]
+  );
 
-    ch.on("broadcast", { event: "call_hangup" }, ({ payload }) => {
-      if (payload.from !== userId) cleanup();
-    });
-
-    ch.on("broadcast", { event: "call_busy" }, ({ payload }) => {
-      if (payload.from !== userId && statusRef.current === "calling") cleanup();
-    });
-
-    ch.on("broadcast", { event: "screen_status" }, ({ payload }) => {
-      if (payload.from !== userId) {
-        setPeerSharingScreen(Boolean(payload.sharing));
-      }
-    });
-
-    // screen share replaceTrack-এর পরে renegotiation (সিএম শেয়ার কালো দেখার ফিক্স)
-    ch.on("broadcast", { event: "call_renegotiate" }, async ({ payload }) => {
-      if (payload.from === userId) return;
-      const pc = pcRef.current;
-      if (!pc || !payload.sdp) return;
-      try {
-        await pc.setRemoteDescription(
-          new RTCSessionDescription(payload.sdp as RTCSessionDescriptionInit)
-        );
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        if (userId) send("call_renegotiate_answer", { from: userId, sdp: answer });
-      } catch {}
-    });
-
-    ch.on("broadcast", { event: "call_renegotiate_answer" }, async ({ payload }) => {
-      if (payload.from === userId) return;
-      const pc = pcRef.current;
-      if (!pc || !payload.sdp) return;
-      try {
-        await pc.setRemoteDescription(
-          new RTCSessionDescription(payload.sdp as RTCSessionDescriptionInit)
-        );
-      } catch {}
-    });
-
-    ch.subscribe();
-    channelRef.current = ch;
-
+  // realtime invites + call status + initial load
+  useEffect(() => {
+    if (!userId) return;
+    const refresh = () => {
+      void loadOpenCalls(true);
+    };
+    const ch = supabase.channel(`call-invites:${userId}`);
+    ch.on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "call_members", filter: `user_id=eq.${userId}` },
+      refresh
+    )
+      .on("postgres_changes", { event: "*", schema: "public", table: "calls" }, refresh)
+      .subscribe();
+    void loadOpenCalls(true);
     return () => {
-      cleanup();
       supabase.removeChannel(ch);
     };
-  }, [userId, cleanup]);
+  }, [loadOpenCalls, userId]);
 
-  const startCall = useCallback(
-    async (video: boolean) => {
-      if (!userId) return;
-      cleanup();
-      setWithVideo(video);
-      setStatus("calling");
+  const enteringRef = useRef(false);
 
+  const enterCall = useCallback(
+    async (callId: string, video: boolean) => {
+      if (!userId || enteringRef.current) return;
+      enteringRef.current = true;
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-          video: video ? { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } } : false,
-        });
+        if (callIdRef.current && callIdRef.current !== callId) {
+          const prev = callIdRef.current;
+          await setMemberState(prev, userId, "left");
+          if ((await countJoinedMembers(prev)) === 0) await endCallRoom(prev);
+          localCleanup();
+        }
+
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: video ? { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } } : false,
+          });
+        } catch (err) {
+          localCleanup();
+          throw err;
+        }
+
         localRef.current = stream;
         setLocalStream(stream);
-
         const at = stream.getAudioTracks()[0];
         const vt = stream.getVideoTracks()[0];
         if (at) micTrackRef.current = at;
         if (vt) camTrackRef.current = vt;
 
-        const pc = createPeer();
-        stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+        callIdRef.current = callId;
+        setCurrentCallId(callId);
+        setWithVideo(video);
+        setIncoming(null);
+        setIncomingVideo(false);
+        setStatus("calling");
+        setSharingScreen(false);
+        setPeerSharingScreen(false);
+        sharersRef.current.clear();
 
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
+        await setMemberState(callId, userId, "joined");
+        await joinChannel(callId);
+        await setCallActive(callId);
 
-        // কলারের নিজস্ব রিংটোন পাঠানো
-        const myRingtone = getSavedRingtone();
-        send("call_offer", {
-          from: userId,
-          sdp: offer,
-          withVideo: video,
-          ringtone: myRingtone,
-        });
-      } catch (err) {
-        cleanup();
-        throw err;
+        // নতুন জয়েনার নিয়ম: সব existing সদস্যকে offer পাঠাও
+        const peers = await getJoinedPeers(callId, userId);
+        peers.forEach((p) => createPeer(p));
+        setJoinableCalls((prev) => prev.filter((c) => c.id !== callId));
+      } finally {
+        enteringRef.current = false;
       }
     },
-    [cleanup, createPeer, send, userId]
+    [createPeer, joinChannel, localCleanup, userId]
   );
 
-  const accept = useCallback(async () => {
-    if (!userId || !pendingOffer.current) return;
-    setStatus("connected");
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: incomingVideo ? { facingMode: "user", width: { ideal: 1280 } } : false,
+  const startDmCall = useCallback(
+    async (peerId: string, video: boolean) => {
+      if (!userId || !peerId || peerId === userId) return;
+      if (statusRef.current !== "idle") return;
+      const call = await createCall({
+        createdBy: userId,
+        kind: "dm",
+        peerId,
+        inviteeIds: [peerId],
+        withVideo: video,
       });
-      localRef.current = stream;
-      setLocalStream(stream);
+      if (!call) throw new Error("failed to create call");
+      await enterCall(call.id, video);
+    },
+    [enterCall, userId]
+  );
 
-      const at = stream.getAudioTracks()[0];
-      const vt = stream.getVideoTracks()[0];
-      if (at) micTrackRef.current = at;
-      if (vt) camTrackRef.current = vt;
+  const startGroupCall = useCallback(
+    async (inviteeIds: string[], video: boolean) => {
+      if (!userId) return;
+      if (statusRef.current !== "idle") return;
+      const call = await createCall({
+        createdBy: userId,
+        kind: "group",
+        peerId: null,
+        inviteeIds,
+        withVideo: video,
+      });
+      if (!call) throw new Error("failed to create call");
+      await enterCall(call.id, video);
+    },
+    [enterCall, userId]
+  );
 
-      const pc = createPeer();
-      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+  const accept = useCallback(() => {
+    if (!incoming) return;
+    return enterCall(incoming.callId, incoming.withVideo);
+  }, [enterCall, incoming]);
 
-      await pc.setRemoteDescription(new RTCSessionDescription(pendingOffer.current));
-      pendingOffer.current = null;
+  const decline = useCallback(async () => {
+    if (!userId || !incoming) return;
+    await setMemberState(incoming.callId, userId, "declined");
+    setIncoming(null);
+    setIncomingVideo(false);
+    setStatus("idle");
+    void loadOpenCalls(true);
+  }, [incoming, loadOpenCalls, userId]);
 
-      while (pendingIce.current.length > 0) {
-        const cand = pendingIce.current.shift();
-        if (cand) await pc.addIceCandidate(new RTCIceCandidate(cand));
-      }
+  const joinCall = useCallback(
+    async (callId: string) => {
+      const row = joinableCalls.find((c) => c.id === callId);
+      if (!row) return;
+      await enterCall(callId, row.with_video);
+    },
+    [enterCall, joinableCalls]
+  );
 
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-
-      send("call_answer", { from: userId, sdp: answer });
-    } catch {
-      cleanup();
+  const hangup = useCallback(async () => {
+    const me = userIdRef.current;
+    const callId = callIdRef.current;
+    if (me && callId) {
+      await setMemberState(callId, me, "left");
+      if ((await countJoinedMembers(callId)) === 0) await endCallRoom(callId);
     }
-  }, [cleanup, createPeer, incomingVideo, send, userId]);
-
-  const hangup = useCallback(() => {
-    if (userId) send("call_hangup", { from: userId });
-    cleanup();
-  }, [cleanup, send, userId]);
+    localCleanup();
+    void loadOpenCalls(true);
+  }, [loadOpenCalls, localCleanup]);
 
   const toggleMic = useCallback(() => {
     if (!micTrackRef.current) return;
@@ -308,57 +528,83 @@ export function useCall(userId: string | null) {
     setCamOn(next);
   }, []);
 
-  const stopScreenShare = useCallback(() => {
+  const stopScreenShare = useCallback(async () => {
     if (screenRef.current) {
       screenRef.current.getTracks().forEach((t) => t.stop());
       screenRef.current = null;
     }
-
-    if (pcRef.current && camTrackRef.current) {
-      const videoSender = pcRef.current.getSenders().find((s) => s.track && s.track.kind === "video");
-      if (videoSender) void videoSender.replaceTrack(camTrackRef.current);
+    for (const pc of pcsRef.current.values()) {
+      const videoSender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
+      if (videoSender) {
+        if (camTrackRef.current) {
+          try {
+            await videoSender.replaceTrack(camTrackRef.current);
+          } catch {}
+        } else {
+          try {
+            pc.removeTrack(videoSender);
+          } catch {}
+        }
+      }
     }
-
-    if (localRef.current) {
-      setLocalStream(new MediaStream(localRef.current.getTracks()));
-    }
-
+    if (localRef.current) setLocalStream(new MediaStream(localRef.current.getTracks()));
     setSharingScreen(false);
-    if (userId) send("screen_status", { from: userId, sharing: false });
-  }, [send, userId]);
+    callChannelRef.current?.send({
+      type: "broadcast",
+      event: "screen",
+      payload: { from: userIdRef.current, sharing: false },
+    });
+  }, []);
 
   const shareScreen = useCallback(async () => {
-    if (!pcRef.current || !userId) return;
+    if (!localRef.current || pcsRef.current.size === 0) return;
     try {
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
         video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: true,
       });
-
       screenRef.current = displayStream;
       const screenTrack = displayStream.getVideoTracks()[0];
       if (!screenTrack) return;
-
       screenTrack.contentHint = "detail";
 
-      const videoSender = pcRef.current.getSenders().find((s) => s.track && s.track.kind === "video");
-      if (videoSender) {
-        await videoSender.replaceTrack(screenTrack);
-      } else {
-        pcRef.current.addTrack(screenTrack, displayStream);
+      for (const pc of pcsRef.current.values()) {
+        const videoSender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
+        if (videoSender) {
+          try {
+            await videoSender.replaceTrack(screenTrack);
+          } catch {}
+        } else {
+          try {
+            pc.addTrack(screenTrack, displayStream);
+          } catch {}
+        }
       }
 
       setLocalStream(displayStream);
       setSharingScreen(true);
-      send("screen_status", { from: userId, sharing: true });
+      callChannelRef.current?.send({
+        type: "broadcast",
+        event: "screen",
+        payload: { from: userIdRef.current, sharing: true },
+      });
 
       screenTrack.onended = () => {
-        stopScreenShare();
+        void stopScreenShare();
       };
     } catch {
-      stopScreenShare();
+      void stopScreenShare();
     }
-  }, [pcRef, send, stopScreenShare, userId]);
+  }, [stopScreenShare]);
+
+  // unmount: best-effort leave so room doesn't stay ghost-joined
+  useEffect(() => {
+    return () => {
+      const callId = callIdRef.current;
+      const me = userIdRef.current;
+      if (callId && me) void setMemberState(callId, me, "left");
+    };
+  }, []);
 
   return {
     status,
@@ -370,10 +616,16 @@ export function useCall(userId: string | null) {
     peerSharingScreen,
     callerRingtone,
     localStream,
-    remoteStream,
-    startCall,
+    remoteStreams,
+    incoming,
+    currentCallId,
+    joinableCalls,
+    startDmCall,
+    startGroupCall,
     accept,
+    decline,
     hangup,
+    joinCall,
     toggleMic,
     toggleCam,
     shareScreen,
