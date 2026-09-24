@@ -22,7 +22,7 @@ export function Conversation({
 }: {
   me: string;
   peerId: string | null;
-  profiles: Record<string, Profile>;
+  profiles: Record<string, Profile> | Profile[];
   onOpenProfile: (id: string) => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -38,6 +38,15 @@ export function Conversation({
   const channelRef = useRef<any>(null);
 
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Profile Map সেফ অবজেক্ট তৈরি (ক্র্যাশ বন্ধ করতে)
+  const profileMap: Record<string, Profile> = useMemo(() => {
+    if (!profiles) return {};
+    if (Array.isArray(profiles)) {
+      return Object.fromEntries(profiles.map((p) => [p.id, p]));
+    }
+    return profiles;
+  }, [profiles]);
 
   const belongsHere = useCallback(
     (m: Message) =>
@@ -60,7 +69,11 @@ export function Conversation({
   useEffect(() => {
     let alive = true;
     void (async () => {
-      let query = supabase.from("messages").select("*").order("created_at", { ascending: true }).limit(300);
+      let query = supabase
+        .from("messages")
+        .select("*")
+        .order("created_at", { ascending: true })
+        .limit(300);
       query = peerId
         ? query.or(
             `and(sender_id.eq.${me},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${me})`
@@ -80,7 +93,7 @@ export function Conversation({
     } catch {}
   }, [messages, peerId]);
 
-  // রিয়েলটাইম চ্যানেল (Messages + Typing + Seen)
+  // রিয়েলটাইম চ্যানেল (Messages + Typing + Seen + Guest Broadcast)
   useEffect(() => {
     const channelName = `zyraxon-thread-${peerId ?? "group"}`;
     const channel = supabase.channel(channelName);
@@ -100,7 +113,19 @@ export function Conversation({
           }
           if (msg.sender_id !== me) {
             playMessageSound();
-            notify(profiles[msg.sender_id]?.display_name ?? "New message", msg.body ?? "Sent you something");
+            notify(profileMap[msg.sender_id]?.display_name ?? "New message", msg.body ?? "Sent you something");
+          }
+          return [...prev, msg];
+        });
+      })
+      .on("broadcast", { event: "guest_message" }, ({ payload }) => {
+        const msg = payload as Message;
+        if (!belongsHere(msg)) return;
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          if (msg.sender_id !== me) {
+            playMessageSound();
+            notify(profileMap[msg.sender_id]?.display_name ?? "Guest User", msg.body ?? "New message");
           }
           return [...prev, msg];
         });
@@ -127,9 +152,9 @@ export function Conversation({
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
       supabase.removeChannel(channel);
     };
-  }, [belongsHere, me, peerId, profiles]);
+  }, [belongsHere, me, peerId, profileMap]);
 
-  // অপর প্রান্তের শেষ মেসেজ দেখলে সাথে সাথে সিন (Seen) ব্রডকাস্ট পাঠানো
+  // শেষ মেসেজ দেখলে অপর প্রান্তে সাথে সাথে Seen ব্রডকাস্ট পাঠানো
   useEffect(() => {
     if (!messages.length || !peerId || !channelRef.current) return;
     const lastMsg = messages[messages.length - 1];
@@ -146,7 +171,7 @@ export function Conversation({
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, isPeerTyping]);
 
-  // টাইপ করার সময় ব্রডকাস্ট প্রেরণ (থ্রটলিং ১.৫ সেকেন্ড)
+  // টাইপিং থ্রটলিং
   const notifyTyping = useCallback(() => {
     const now = Date.now();
     if (now - lastTypingSentRef.current > 1500 && channelRef.current) {
@@ -159,52 +184,72 @@ export function Conversation({
     }
   }, [me]);
 
+  // মেসেজ সেন্ড
   const send = useCallback(
     async (msg: OutgoingMessage) => {
       setSending(true);
       try {
-        const base = { sender_id: me, recipient_id: peerId };
+        const isGuest = profileMap[me]?.is_guest || me.includes("guest");
+        const baseMsg: Partial<Message> = {
+          id: `msg-${Date.now()}`,
+          sender_id: me,
+          recipient_id: peerId,
+          created_at: new Date().toISOString(),
+        };
+
         if (msg.kind === "text") {
-          await supabase.from("messages").insert({ ...base, kind: "text", body: msg.body });
+          baseMsg.kind = "text";
+          baseMsg.body = msg.body;
         } else if (msg.kind === "gif") {
-          await supabase.from("messages").insert({ ...base, kind: "gif", media_url: msg.url });
+          baseMsg.kind = "gif";
+          baseMsg.media_url = msg.url;
         } else {
           const path = await uploadMedia(me, msg.file);
+          baseMsg.kind = kindOf(msg.file);
+          baseMsg.media_url = path;
+          baseMsg.media_name = msg.file.name;
+        }
+
+        // গেস্টদের মেসেজ ক্লাউড ডাটাবেজে যাবে না, শুধু রিয়েলটাইমে থাকবে
+        if (isGuest) {
+          setMessages((prev) => [...prev, baseMsg as Message]);
+          channelRef.current?.send({
+            type: "broadcast",
+            event: "guest_message",
+            payload: baseMsg,
+          });
+        } else {
           await supabase.from("messages").insert({
-            ...base,
-            kind: kindOf(msg.file),
-            media_url: path,
-            media_name: msg.file.name,
+            sender_id: me,
+            recipient_id: peerId,
+            kind: baseMsg.kind,
+            body: baseMsg.body,
+            media_url: baseMsg.media_url,
+            media_name: baseMsg.media_name,
           });
         }
       } catch {
-        toast.error("Could not send that");
+        toast.error("Could not send message");
       } finally {
         setSending(false);
       }
     },
-    [me, peerId]
+    [me, peerId, profileMap]
   );
 
   async function removeMessage(id: string) {
     setMessages((prev) => prev.filter((m) => m.id !== id));
-    const { error } = await supabase.from("messages").delete().eq("id", id);
-    if (error) toast.error("Could not delete");
+    await supabase.from("messages").delete().eq("id", id);
   }
 
   async function saveEdit(id: string) {
     const body = editText.trim();
     setEditingId(null);
     if (!body) return;
-    const { error } = await supabase
-      .from("messages")
-      .update({ body, edited_at: new Date().toISOString() })
-      .eq("id", id);
-    if (error) toast.error("Could not edit");
-    else
-      setMessages((prev) =>
-        prev.map((m) => (m.id === id ? { ...m, body, edited_at: new Date().toISOString() } : m))
-      );
+    setMessages((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, body, edited_at: new Date().toISOString() } : m))
+    );
+    await supabase.from("messages").update({ body, edited_at: new Date().toISOString() }).eq("id", id);
   }
 
   const rows = useMemo(
@@ -212,25 +257,24 @@ export function Conversation({
     [messages, belongsHere, me]
   );
 
-  // আমার পাঠানো সর্বশেষ মেসেজ যা অপর প্রান্ত দেখেছে
   const lastMineMsg = useMemo(() => {
     const mineMsgs = rows.filter((r) => r.mine);
     return mineMsgs.length ? mineMsgs[mineMsgs.length - 1] : null;
   }, [rows]);
 
-  const peerProfile = peerId ? profiles[peerId] : null;
+  const peerProfile = peerId ? profileMap[peerId] : null;
 
   return (
     <div className="flex h-full flex-col">
       <main className="scroll-soft mx-auto flex w-full max-w-3xl flex-1 flex-col gap-3 overflow-y-auto px-3 py-3">
         {rows.length === 0 && (
           <p className="mt-16 text-center text-sm text-muted-foreground">
-            Say the first word. Everything here stays between you.
+            Say the first word. Everything here is private and real-time.
           </p>
         )}
 
         {rows.map((m) => {
-          const author = profiles[m.sender_id];
+          const author = profileMap[m.sender_id];
           const isSeenTarget =
             m.mine &&
             peerId &&
@@ -246,7 +290,7 @@ export function Conversation({
 
                 <div
                   className={`glass max-w-[78%] rounded-3xl px-4 py-2.5 ${
-                    m.mine ? "rounded-br-lg" : "rounded-bl-lg"
+                    m.mine ? "rounded-br-lg bg-primary/20" : "rounded-bl-lg"
                   }`}
                 >
                   {!m.mine && (
@@ -278,12 +322,12 @@ export function Conversation({
                   )}
 
                   <div className="mt-1 flex items-center justify-end gap-2">
+                    {/* শুধুমাত্র নিজের পাঠানো মেসেজে এডিট ও ডিলিট বাটন */}
                     {m.mine && editingId !== m.id && (
                       <>
                         {m.kind === "text" && (
                           <button
                             type="button"
-                            aria-label="Edit message"
                             onClick={() => {
                               setEditingId(m.id);
                               setEditText(m.body ?? "");
@@ -295,7 +339,6 @@ export function Conversation({
                         )}
                         <button
                           type="button"
-                          aria-label="Delete message"
                           onClick={() => void removeMessage(m.id)}
                           className="text-muted-foreground opacity-0 transition hover:text-destructive group-hover:opacity-100"
                         >
@@ -314,14 +357,11 @@ export function Conversation({
                 </div>
               </div>
 
-              {/* ফেসবুক মেসেঞ্জারের মতো মেসেজের নিচে Seen স্ট্যাটাস এবং ছোট প্রোফাইল ছবি */}
+              {/* ফেসবুক মেসেঞ্জার-স্টাইল Seen স্ট্যাটাস */}
               {isSeenTarget && peerProfile && (
-                <div className="mr-10 mt-1 flex items-center justify-end gap-1.5 animate-fade-in">
+                <div className="mr-10 mt-1 flex items-center justify-end gap-1.5">
                   <span className="text-[10px] text-muted-foreground">Seen</span>
-                  <div
-                    title={`Seen by ${peerProfile.display_name}`}
-                    className="relative h-4 w-4 overflow-hidden rounded-full ring-1 ring-primary/40"
-                  >
+                  <div className="h-4 w-4 overflow-hidden rounded-full ring-1 ring-primary/40">
                     <Avatar profile={peerProfile} className="h-full w-full text-[8px]" />
                   </div>
                 </div>
@@ -330,16 +370,16 @@ export function Conversation({
           );
         })}
 
-        {/* রিয়েল-টাইম থ্রি-ডট টাইপিং / AI থিংকিং অ্যানিমেশন */}
+        {/* ৩-ডট টাইপিং এনিমেশন */}
         {isPeerTyping && (
-          <div className="flex items-center gap-2 animate-fade-in pl-1">
+          <div className="flex items-center gap-2 pl-1">
             {peerProfile && <Avatar profile={peerProfile} className="h-7 w-7 ring-2 ring-primary/30" />}
             <div className="glass flex items-center gap-1.5 rounded-2xl px-3.5 py-2 shadow-sm border border-white/10">
               <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:-0.3s]" />
               <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:-0.15s]" />
               <span className="h-2 w-2 rounded-full bg-primary animate-bounce" />
               <span className="ml-1 text-[11px] font-medium text-muted-foreground">
-                {peerProfile ? `${peerProfile.display_name} is typing…` : "Thinking…"}
+                {peerProfile ? `${peerProfile.display_name} is typing…` : "typing…"}
               </span>
             </div>
           </div>
