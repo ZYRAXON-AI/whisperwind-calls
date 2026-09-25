@@ -91,6 +91,34 @@ export function playCallAlert() {
   tone(1318, 0.36, 0.3, 0.4, "sine");
 }
 
+// Neutral telephone-style ringback that the CALLER hears while the callee rings.
+// The callee hears the caller's chosen ringtone instead — two separate sounds.
+const RINGBACK_PRESET: RingtonePreset = {
+  id: "ringback",
+  name: "Ringback",
+  description: "Neutral incoming-ring tone the caller hears while waiting",
+  notes: [
+    { f: 425, t: 0, d: 0.3, v: 0.25 },
+    { f: 425, t: 0.35, d: 0.3, v: 0.25 },
+    { f: 0, t: 0.8, d: 3.0, v: 0 },
+  ],
+};
+
+export function startRingback() {
+  unlockSound();
+  const c = audio();
+  if (!c) return;
+  if (activeRingtone === "ringback" && ringSource && ctx?.state === "running") return;
+  stopLoopSource();
+  stopYoutubeRingtone();
+  startLoopRing(RINGBACK_PRESET, "ringback");
+}
+
+export function stopRingback() {
+  stopLoopSource();
+  stopYoutubeRingtone();
+}
+
 export type RingNote = {
   f: number;
   t: number;

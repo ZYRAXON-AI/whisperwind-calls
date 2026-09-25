@@ -59,7 +59,7 @@ function isMissingTable(error: { code?: string; message?: string } | null): bool
 }
 
 const INVITE_CHANNEL = "zyraxon-call-invites-all";
-const RING_MS = 1200;
+const RING_MS = 900;
 
 type InviteHandler = (invite: CallInvite) => void;
 type CancelHandler = (cancel: InviteCancel) => void;
@@ -346,6 +346,11 @@ export function stopInviteRing(callId?: string): void {
     clearInterval(ringTimer);
     ringTimer = null;
   }
+}
+
+// Immediately re-send all active invites (caller returns to the tab, so late/openers catch up)
+export function pokeInviteRing(): void {
+  for (const inv of ringInvites) void broadcastInvite(inv);
 }
 
 export function subscribeRoomOpens(handler: RoomHandler): () => void {

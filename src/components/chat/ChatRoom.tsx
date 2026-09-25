@@ -37,10 +37,9 @@ import {
 } from "@/lib/social";
 import {
   ensureNotificationPermission,
-  getSavedRingtone,
   notify,
-  playCallAlert,
   playMessageSound,
+  startRingback,
   startRingtone,
   stopRingtone,
   unlockSound,
@@ -231,14 +230,13 @@ export function ChatRoom({
           vibrate: [500, 200, 500, 200, 700],
         }
       );
-      playCallAlert();
       try {
         navigator.vibrate?.([500, 200, 500, 200, 700]);
       } catch {}
     } else if (call.status === "calling" && call.outgoing) {
-      // We placed the call — ring with THEIR ringtone (fallback: our own preset)
+      // We placed the call — play a neutral ringback in our ear (not our own melody)
       unlockSound();
-      startRingtone(call.peerRingtone || getSavedRingtone());
+      startRingback();
     } else {
       stopRingtone();
       try {
@@ -251,13 +249,7 @@ export function ChatRoom({
         navigator.vibrate?.(0);
       } catch {}
     };
-  }, [
-    call.status,
-    call.callerRingtone,
-    call.incoming,
-    call.outgoing,
-    call.peerRingtone,
-  ]);
+  }, [call.status, call.callerRingtone, call.incoming, call.outgoing]);
 
   // Background tab → user returns while the call is still ringing (incoming OR
   // outgoing-caller): restart the ringtone, because some browsers pause audio in
@@ -265,11 +257,10 @@ export function ChatRoom({
   useEffect(() => {
     const ringing = call.status === "incoming" || (call.status === "calling" && call.outgoing);
     if (!ringing) return;
-    const tone =
-      call.status === "incoming" ? call.callerRingtone : call.peerRingtone || getSavedRingtone();
     const restart = () => {
       unlockSound();
-      startRingtone(tone);
+      if (call.status === "incoming") startRingtone(call.callerRingtone);
+      else startRingback();
     };
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
@@ -290,7 +281,7 @@ export function ChatRoom({
       document.removeEventListener("pointerdown", restart);
       document.removeEventListener("keydown", restart);
     };
-  }, [call.status, call.callerRingtone, call.outgoing, call.peerRingtone]);
+  }, [call.status, call.callerRingtone, call.outgoing]);
 
   const friendIds = useMemo(() => friendIdsOf(friendships, user.id), [friendships, user.id]);
   const friends = friendIds.map((id) => profiles[id]).filter(Boolean) as Profile[];

@@ -5,6 +5,7 @@ import {
   createCall,
   endCallRoom,
   fetchMyOpenCalls,
+  pokeInviteRing,
   setCallActive,
   startInviteRing,
   stopInviteRing,
@@ -26,7 +27,7 @@ export type CallStatus = "idle" | "calling" | "incoming" | "connected";
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
   { urls: ["stun:stun.services.mozilla.com"] },
-  { urls: ["stun:global.stun.twilio.com:3478"] },
+  { urls: ["stun:global.stun.twilio.com:3478", "stun:stun.cloudflare.com:3478"] },
   {
     urls: [
       "turn:openrelay.metered.ca:80",
@@ -303,7 +304,9 @@ export function useCall(userId: string | null) {
           void handleSig(payload);
         })
           .on("broadcast", { event: "joined" }, ({ payload }) => {
-            if (payload?.userId && payload.userId !== userId) createPeer(payload.userId, true);
+            if (payload?.userId && payload.userId !== userId) {
+              createPeer(payload.userId, userId < payload.userId);
+            }
           })
           .on("broadcast", { event: "screen" }, ({ payload }) => {
             if (payload?.userId && payload.userId !== userId) {
@@ -556,6 +559,21 @@ export function useCall(userId: string | null) {
       unsubCloses();
     };
   }, [userId]);
+
+  // When the caller returns to the tab, re-broadcast the invites so peers who
+  // opened the app late still receive the ringing call.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if (statusRef.current === "calling" && isCallerRef.current) pokeInviteRing();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, []);
 
   return {
     status,
