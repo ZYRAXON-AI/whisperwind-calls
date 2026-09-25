@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-
 import { nextWallpaper, type Wallpaper } from "@/lib/backgrounds";
 
 const ROTATE_MS = 60000;
@@ -20,7 +19,6 @@ export function Backdrop() {
     };
   }, []);
 
-  // Every 60s preload a brand-new random picture, then crossfade to it
   useEffect(() => {
     const t = window.setInterval(() => {
       if (document.visibilityState === "hidden") return;
@@ -47,13 +45,13 @@ export function Backdrop() {
           src={shot.url}
           alt=""
           decoding="async"
-          className={`absolute inset-0 h-full w-full scale-105 object-cover transition-opacity duration-[2000ms] ${
+          className={`absolute inset-0 h-full w-full scale-100 object-cover transition-opacity duration-[2000ms] ${
             i === active ? "opacity-100" : "opacity-0"
           }`}
         />
       ))}
-      <div className="absolute -left-40 top-[-10%] h-[36rem] w-[36rem] rounded-full bg-primary/10 blur-[70px]" />
-      <div className="absolute -right-32 bottom-[-15%] h-[34rem] w-[34rem] rounded-full bg-accent/15 blur-[80px]" />
+      {/* Subtle tint so text stays legible on bright wallpaper without obscuring the image */}
+      <div className="absolute inset-0 bg-black/25" />
     </div>
   );
 }
