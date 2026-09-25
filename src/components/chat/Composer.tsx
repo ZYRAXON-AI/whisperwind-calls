@@ -11,10 +11,13 @@ import {
   Mic,
   Square,
   Trash2,
+  Search,
 } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { bumpEmoji, searchEmojis, type EmojiHit } from "@/lib/emojiLibrary";
+import { EmojiSuggestStrip } from "./EmojiSuggestStrip";
 import { GifPicker } from "./GifPicker";
 
 export type OutgoingMessage =
@@ -39,6 +42,11 @@ export function Composer({
   const [text, setText] = useState("");
   const [plusOpen, setPlusOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [suggestVersion, setSuggestVersion] = useState(0);
+  const [emojiQuery, setEmojiQuery] = useState("");
+  const [emojiHits, setEmojiHits] = useState<EmojiHit[]>([]);
+  const [emojiSearching, setEmojiSearching] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Live voice-typing state
   const [isSpeechListening, setIsSpeechListening] = useState(false);
@@ -69,6 +77,48 @@ export function Composer({
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    const query = emojiQuery.trim();
+    setEmojiSearching(Boolean(query));
+    if (!query) {
+      setEmojiHits([]);
+      return;
+    }
+    let alive = true;
+    const t = setTimeout(async () => {
+      const hits = await searchEmojis(query);
+      if (alive) {
+        setEmojiHits(hits);
+        setEmojiSearching(false);
+      }
+    }, 250);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+  }, [emojiQuery]);
+
+  function insertEmoji(emoji: string) {
+    bumpEmoji(emoji);
+    const ta = textareaRef.current;
+    if (ta) {
+      const start = ta.selectionStart ?? text.length;
+      const end = ta.selectionEnd ?? start;
+      const next = text.slice(0, start) + emoji + text.slice(end);
+      setText(next);
+      baseTextRef.current = next;
+      requestAnimationFrame(() => {
+        ta.focus();
+        ta.setSelectionRange(start + emoji.length, start + emoji.length);
+      });
+    } else {
+      setText((t) => t + emoji);
+      baseTextRef.current += emoji;
+    }
+    onTyping?.();
+    setSuggestVersion((v) => v + 1);
+  }
 
   function startSpeechRecognition() {
     const win = window as unknown as IWindow;
@@ -236,6 +286,8 @@ export function Composer({
       <input ref={videoRef} type="file" accept="video/*" hidden onChange={(e) => pickFile(e.target.files)} />
       <input ref={audioRef} type="file" accept="audio/*" hidden onChange={(e) => pickFile(e.target.files)} />
 
+      {!isRecording && <EmojiSuggestStrip onPick={insertEmoji} version={suggestVersion} />}
+
       <div className="flex items-end gap-2">
         {!isRecording ? (
           <>
@@ -267,7 +319,13 @@ export function Composer({
               </PopoverContent>
             </Popover>
 
-            <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
+            <Popover open={emojiOpen} onOpenChange={(open) => {
+              setEmojiOpen(open);
+              if (!open) {
+                setEmojiQuery("");
+                setEmojiHits([]);
+              }
+            }}>
               <PopoverTrigger asChild>
                 <button
                   type="button"
@@ -284,17 +342,62 @@ export function Composer({
                     <TabsTrigger value="gif">GIF</TabsTrigger>
                   </TabsList>
                   <TabsContent value="emoji">
-                    <EmojiPicker
-                      theme={Theme.DARK}
-                      width="100%"
-                      height={320}
-                      lazyLoadEmojis
-                      onEmojiClick={(e) => {
-                        setText((t) => t + e.emoji);
-                        baseTextRef.current += e.emoji;
-                        onTyping?.();
-                      }}
-                    />
+                    <div className="mb-2 flex items-center gap-2 rounded-xl border border-border bg-input px-3 py-2">
+                      <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <input
+                        value={emojiQuery}
+                        onChange={(e) => setEmojiQuery(e.target.value)}
+                        placeholder="Search 3000+ emoji…"
+                        className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                      />
+                    </div>
+                    {emojiQuery.trim() ? (
+                      <div className="scroll-soft grid max-h-80 grid-cols-6 gap-1 overflow-y-auto py-1">
+                        {emojiSearching ? (
+                          <div className="col-span-6 flex items-center justify-center py-10 text-muted-foreground">
+                            <Loader2 className="h-5 w-5 animate-spin" />
+                          </div>
+                        ) : emojiHits.length === 0 ? (
+                          <p className="col-span-6 py-8 text-center text-xs text-muted-foreground">
+                            No emoji found — try another word
+                          </p>
+                        ) : (
+                          emojiHits.map((hit) => (
+                            <button
+                              key={hit.image || hit.emoji}
+                              type="button"
+                              title={hit.label}
+                              onClick={() => {
+                                if (hit.image) {
+                                  setEmojiOpen(false);
+                                  setEmojiQuery("");
+                                  void onSend({ kind: "gif", url: hit.image });
+                                } else {
+                                  insertEmoji(hit.emoji);
+                                }
+                              }}
+                              className="grid h-10 place-items-center rounded-lg text-xl transition hover:bg-white/15"
+                            >
+                              {hit.image ? (
+                                <img src={hit.image} alt={hit.label} className="h-7 w-7" loading="lazy" />
+                              ) : (
+                                hit.emoji
+                              )}
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    ) : (
+                      <EmojiPicker
+                        theme={Theme.DARK}
+                        width="100%"
+                        height={320}
+                        lazyLoadEmojis
+                        onEmojiClick={(e) => {
+                          insertEmoji(e.emoji);
+                        }}
+                      />
+                    )}
                   </TabsContent>
                   <TabsContent value="gif">
                     <GifPicker
@@ -343,6 +446,7 @@ export function Composer({
             )}
 
             <textarea
+              ref={textareaRef}
               value={text}
               onChange={(e) => {
                 setText(e.target.value);
