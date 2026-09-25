@@ -1,17 +1,13 @@
 // Notification & ringtone sounds that work in background tabs and mobile devices.
-// Ringtones loop a pre-rendered WebAudio buffer (AudioBufferSourceNode.loop=true).
-// Buffer sources are NOT throttled in hidden background tabs the way setInterval is,
-// so the callee keeps hearing the ring continuously until they answer or hang up.
 let ctx: AudioContext | null = null;
 let ringSource: AudioBufferSourceNode | null = null;
 let previewTimer: ReturnType<typeof setTimeout> | null = null;
 let ringWatchdog: ReturnType<typeof setInterval> | null = null;
 let activeRingtone = "";
 const ringBufferCache = new Map<string, AudioBuffer>();
-// YouTube ringtone (yt:VIDEOID) plays via a hidden looping audio iframe
 const ytFrames = new Set<HTMLIFrameElement>();
 
-function audio(): AudioContext | null {
+export function audio(): AudioContext | null {
   if (typeof window === "undefined") return null;
   if (!ctx) {
     const Ctor =
@@ -20,16 +16,25 @@ function audio(): AudioContext | null {
     if (!Ctor) return null;
     ctx = new Ctor();
   }
-  if (ctx.state === "suspended") void ctx.resume();
+  if (ctx.state === "suspended") {
+    void ctx.resume().catch(() => undefined);
+  }
   return ctx;
 }
 
-// Keep audio alive when tab becomes visible again (background suspends AudioContext)
-if (typeof document !== "undefined") {
+// Global user gesture unlocker for mobile & desktop
+if (typeof window !== "undefined") {
+  const unlockEvents = ["pointerdown", "touchstart", "keydown", "click"];
+  const handleInteraction = () => {
+    unlockSound();
+    unlockEvents.forEach((ev) => window.removeEventListener(ev, handleInteraction));
+  };
+  unlockEvents.forEach((ev) => window.addEventListener(ev, handleInteraction, { passive: true }));
+
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
       const c = audio();
-      if (c && c.state === "suspended") void c.resume();
+      if (c && c.state === "suspended") void c.resume().catch(() => undefined);
     }
   });
 }
@@ -37,68 +42,61 @@ if (typeof document !== "undefined") {
 export function unlockSound() {
   const c = audio();
   if (!c) return;
-  if (c.state === "suspended") void c.resume();
-  const osc = c.createOscillator();
-  const gain = c.createGain();
-  gain.gain.value = 0.0001;
-  osc.connect(gain).connect(c.destination);
-  osc.start();
-  osc.stop(c.currentTime + 0.01);
+  if (c.state === "suspended") void c.resume().catch(() => undefined);
+  try {
+    const osc = c.createOscillator();
+    const gain = c.createGain();
+    gain.gain.value = 0.0001;
+    osc.connect(gain).connect(c.destination);
+    osc.start();
+    osc.stop(c.currentTime + 0.02);
+  } catch {}
 }
 
 function tone(
   freq: number,
   start: number,
   duration: number,
-  volume = 0.22,
+  volume = 0.25,
   type: OscillatorType = "sine"
 ) {
   const c = audio();
   if (!c) return;
-  const osc = c.createOscillator();
-  const gain = c.createGain();
-  osc.type = type;
-  osc.frequency.value = freq;
-  const t = c.currentTime + start;
-  gain.gain.setValueAtTime(0.0001, t);
-  gain.gain.exponentialRampToValueAtTime(volume, t + 0.02);
-  gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
-  osc.connect(gain).connect(c.destination);
-  osc.start(t);
-  osc.stop(t + duration + 0.05);
+  try {
+    const osc = c.createOscillator();
+    const gain = c.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    const t = c.currentTime + start;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(volume, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+    osc.connect(gain).connect(c.destination);
+    osc.start(t);
+    osc.stop(t + duration + 0.05);
+  } catch {}
 }
 
-// Soft ascending chime — plays when a message is sent or received
 export function playMessageSound() {
   unlockSound();
-  const c = audio();
-  if (!c) return;
-  if (c.state === "suspended") void c.resume();
-  tone(784, 0, 0.12, 0.16, "sine"); // G5
-  tone(988, 0.07, 0.14, 0.15, "sine"); // B5
-  tone(1318.5, 0.15, 0.24, 0.17, "triangle"); // E6
+  tone(784, 0, 0.12, 0.18, "sine"); // G5
+  tone(988, 0.07, 0.14, 0.17, "sine"); // B5
+  tone(1318.5, 0.15, 0.24, 0.2, "triangle"); // E6
 }
 
-// Louder ring for incoming calls (survives brief AudioContext pauses)
 export function playCallAlert() {
   unlockSound();
-  const c = audio();
-  if (!c) return;
-  if (c.state === "suspended") void c.resume();
   tone(880, 0, 0.2, 0.35, "triangle");
   tone(1108, 0.18, 0.2, 0.35, "triangle");
   tone(1318, 0.36, 0.3, 0.4, "sine");
 }
 
-// ---------------- Ringtone presets ----------------
-// notes are rendered into a looping AudioBuffer so the ring is CONTINUOUS:
-// no setInterval, no gaps, immune to background-tab timer throttling.
 export type RingNote = {
-  f: number; // frequency Hz
-  t: number; // start offset (seconds into the loop)
-  d: number; // duration (seconds)
-  v?: number; // volume 0..1 (default 0.25)
-  w?: number; // wave: 0 sine (default) | 1 triangle | 2 sawtooth
+  f: number;
+  t: number;
+  d: number;
+  v?: number;
+  w?: number;
 };
 
 export type RingtonePreset = {
@@ -114,8 +112,8 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
     name: "Zyraxon Classic",
     description: "Standard high-frequency classic chime",
     notes: [
-      { f: 660, t: 0, d: 0.35, v: 0.3 },
-      { f: 880, t: 0.4, d: 0.45, v: 0.3 },
+      { f: 660, t: 0, d: 0.35, v: 0.32 },
+      { f: 880, t: 0.4, d: 0.45, v: 0.32 },
     ],
   },
   {
@@ -123,10 +121,10 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
     name: "Romantic Melody",
     description: "Sweet harp and soft romantic ring",
     notes: [
-      { f: 523.25, t: 0.0, d: 0.2, v: 0.25, w: 1 }, // C5
-      { f: 659.25, t: 0.18, d: 0.2, v: 0.25, w: 1 }, // E5
-      { f: 783.99, t: 0.36, d: 0.3, v: 0.25, w: 1 }, // G5
-      { f: 1046.5, t: 0.58, d: 0.45, v: 0.28 }, // C6
+      { f: 523.25, t: 0.0, d: 0.2, v: 0.28, w: 1 },
+      { f: 659.25, t: 0.18, d: 0.2, v: 0.28, w: 1 },
+      { f: 783.99, t: 0.36, d: 0.3, v: 0.28, w: 1 },
+      { f: 1046.5, t: 0.58, d: 0.45, v: 0.3 },
     ],
   },
   {
@@ -134,10 +132,10 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
     name: "Cyber Pulse",
     description: "Futuristic high-tech synth cyber ring",
     notes: [
-      { f: 440, t: 0, d: 0.12, v: 0.22, w: 2 },
-      { f: 880, t: 0.12, d: 0.12, v: 0.22, w: 2 },
-      { f: 1760, t: 0.24, d: 0.2, v: 0.18 },
-      { f: 1320, t: 0.48, d: 0.25, v: 0.2, w: 2 },
+      { f: 440, t: 0, d: 0.12, v: 0.25, w: 2 },
+      { f: 880, t: 0.12, d: 0.12, v: 0.25, w: 2 },
+      { f: 1760, t: 0.24, d: 0.2, v: 0.22 },
+      { f: 1320, t: 0.48, d: 0.25, v: 0.25, w: 2 },
     ],
   },
   {
@@ -145,9 +143,9 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
     name: "Lo-Fi Dream",
     description: "Relaxing soft dream chimes",
     notes: [
-      { f: 392, t: 0.0, d: 0.3, v: 0.25 }, // G4
-      { f: 587.33, t: 0.25, d: 0.35, v: 0.25 }, // D5
-      { f: 659.25, t: 0.55, d: 0.4, v: 0.25, w: 1 }, // E5
+      { f: 392, t: 0.0, d: 0.3, v: 0.28 },
+      { f: 587.33, t: 0.25, d: 0.35, v: 0.28 },
+      { f: 659.25, t: 0.55, d: 0.4, v: 0.28, w: 1 },
     ],
   },
   {
@@ -155,9 +153,9 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
     name: "Bright Marimba",
     description: "iPhone-style lively marimba melody",
     notes: [
-      { f: 659.25, t: 0, d: 0.15, v: 0.3 },
-      { f: 587.33, t: 0.15, d: 0.15, v: 0.3 },
-      { f: 523.25, t: 0.3, d: 0.18, v: 0.3 },
+      { f: 659.25, t: 0, d: 0.15, v: 0.32 },
+      { f: 587.33, t: 0.15, d: 0.15, v: 0.32 },
+      { f: 523.25, t: 0.3, d: 0.18, v: 0.32 },
       { f: 783.99, t: 0.5, d: 0.35, v: 0.35 },
     ],
   },
@@ -166,9 +164,9 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
     name: "Zen Bells",
     description: "Calming crystal bells",
     notes: [
-      { f: 1046.5, t: 0.0, d: 0.4, v: 0.2 },
-      { f: 1318.51, t: 0.3, d: 0.4, v: 0.2 },
-      { f: 1567.98, t: 0.6, d: 0.5, v: 0.25 },
+      { f: 1046.5, t: 0.0, d: 0.4, v: 0.22 },
+      { f: 1318.51, t: 0.3, d: 0.4, v: 0.22 },
+      { f: 1567.98, t: 0.6, d: 0.5, v: 0.26 },
     ],
   },
 ];
@@ -182,13 +180,9 @@ export function getSavedRingtone(): string {
 
 export function setSavedRingtone(id: string) {
   if (typeof window === "undefined") return;
-  localStorage.setItem(STORAGE_KEY, id);
+  localStorage.setItem(STORAGE_KEY, id || "classic");
 }
 
-// Play a YouTube ringtone (yt:VIDEOID) via ONE hidden looping iframe.
-// Browsers block unmuted iframe autoplay until a user gesture, so we keep a
-// looping native "ringing" melody running underneath — the callee is guaranteed
-// to HEAR the call even if the music video can't auto-play.
 function playYoutubeRingtone(videoId: string) {
   if (typeof document === "undefined") return;
   stopYoutubeRingtone();
@@ -212,7 +206,6 @@ function stopYoutubeRingtone() {
   ytFrames.clear();
 }
 
-// Render one preset's notes into a cached AudioBuffer (a single looping voice)
 function renderRingBuffer(c: AudioContext, presetId: string, notes: RingNote[]): AudioBuffer {
   const key = `${presetId}:${c.sampleRate}`;
   const cached = ringBufferCache.get(key);
@@ -231,7 +224,6 @@ function renderRingBuffer(c: AudioContext, presetId: string, notes: RingNote[]):
       const idx = startS + i;
       if (idx >= len) break;
       const tt = i / sr;
-      // quick attack + release so each note has a musical envelope
       const attack = Math.min(1, tt / 0.02);
       const release = Math.max(0, Math.min(1, (n.d - tt) / 0.15));
       let sample: number;
@@ -245,16 +237,13 @@ function renderRingBuffer(c: AudioContext, presetId: string, notes: RingNote[]):
   return buf;
 }
 
-// Only a watchdog that resumes a suspended context — the loop itself never stops.
-// Chrome does NOT throttle a playing AudioBufferSourceNode in a hidden tab, so the
-// loop keeps ringing; we only need to rescue context suspension (iOS/mobile).
 function startWatchdog() {
   if (ringWatchdog) return;
   ringWatchdog = setInterval(() => {
     const c = ctx;
     if (!c) return;
-    if (c.state === "suspended") void c.resume();
-  }, 1200);
+    if (c.state === "suspended") void c.resume().catch(() => undefined);
+  }, 1000);
 }
 
 function stopLoopSource() {
@@ -275,8 +264,6 @@ function stopLoopSource() {
   }
 }
 
-// Start an endlessly looping version of a preset on the shared context.
-// requestedId keeps the idempotency key == what the user asked for (e.g. yt:ID).
 function startLoopRing(preset: RingtonePreset, requestedId?: string) {
   stopLoopSource();
   const c = audio();
@@ -288,23 +275,25 @@ function startLoopRing(preset: RingtonePreset, requestedId?: string) {
   gain.gain.value = 1;
   gain.connect(c.destination);
   src.connect(gain);
-  src.start();
-  ringSource = src;
-  activeRingtone = requestedId ?? preset.id;
-  startWatchdog();
+  try {
+    src.start();
+    ringSource = src;
+    activeRingtone = requestedId ?? preset.id;
+    startWatchdog();
+  } catch {}
 }
 
-// Play the caller-selected ringtone (preset id or yt:VIDEOID)
 export function startRingtone(presetId?: string) {
-  const id = presetId || getSavedRingtone();
+  const id = presetId?.trim() || getSavedRingtone();
   unlockSound();
   const c = audio();
   if (!c) return;
-  // Already looping this exact tone with a live context — don't restart (no gaps)
   if (activeRingtone === id && ringSource && ctx?.state === "running") return;
+
   if (id.startsWith("yt:")) {
     stopLoopSource();
     playYoutubeRingtone(id.slice(3));
+    // YouTube iframe যদি ব্রাউজার অটো-প্লে নীতি দ্বারা ব্লক হয়, ব্যাকগ্রাউন্ড ক্লাসিক রিংটোন বাজবে
     startLoopRing(RINGTONE_PRESETS[0]!, id);
     return;
   }
@@ -333,7 +322,7 @@ export function previewRingtone(presetId: string) {
   }
   previewTimer = setTimeout(() => {
     stopRingtone();
-  }, 1700);
+  }, 3500);
 }
 
 export async function ensureNotificationPermission() {
@@ -347,8 +336,6 @@ export async function ensureNotificationPermission() {
   }
 }
 
-// System notification via ServiceWorker (required on Android PWA).
-// force=true → also show while page is visible (calls, important alerts).
 export function notify(
   title: string,
   body: string,
@@ -367,23 +354,19 @@ export function notify(
     renotify: true,
   };
 
-  const show = () => {
-    try {
-      if ("serviceWorker" in navigator && navigator.serviceWorker) {
-        navigator.serviceWorker.ready
-          .then((reg) => reg.showNotification(title, notificationOpts))
-          .catch(() => {
-            try {
-              new Notification(title, notificationOpts);
-            } catch {}
-          });
-      } else {
-        new Notification(title, notificationOpts);
-      }
-    } catch {}
-  };
-
-  show();
+  try {
+    if ("serviceWorker" in navigator && navigator.serviceWorker) {
+      navigator.serviceWorker.ready
+        .then((reg) => reg.showNotification(title, notificationOpts))
+        .catch(() => {
+          try {
+            new Notification(title, notificationOpts);
+          } catch {}
+        });
+    } else {
+      new Notification(title, notificationOpts);
+    }
+  } catch {}
 
   try {
     const vib = opts?.vibrate ?? [180, 90, 180];
