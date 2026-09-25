@@ -1,10 +1,3 @@
-/* ==========================================
-   ফাইল ৩: src/styles.css (সম্পূর্ণ নিখুঁত কোড)
-   - ব্যাকগ্রাউন্ড স্পষ্ট দৃশ্যমান
-   - মোবাইল স্ক্রিনে কোনো ল্যাগ নেই (Hardware Accelerated)
-   - নিচের চ্যাট কম্পোজার ঠিকভাবে রেন্ডার হবে
-   ========================================== */
-
 @import "tailwindcss" source(none);
 @source "../src";
 @import "tw-animate-css";
@@ -43,32 +36,32 @@
 
 :root {
   --radius: 1rem;
-  --background: oklch(0.14 0.04 290);
-  --foreground: oklch(0.98 0.01 320);
-  --card: oklch(0.2 0.04 290 / 40%);
-  --card-foreground: oklch(0.98 0.01 320);
-  --popover: oklch(0.18 0.04 290 / 85%);
-  --popover-foreground: oklch(0.98 0.01 320);
+  --background: transparent;
+  --foreground: oklch(0.99 0.01 320);
+  --card: oklch(0 0 0 / 22%);
+  --card-foreground: oklch(0.99 0.01 320);
+  --popover: oklch(0.1 0.03 290 / 85%);
+  --popover-foreground: oklch(0.99 0.01 320);
   --primary: oklch(0.74 0.17 355);
   --primary-foreground: oklch(0.17 0.05 300);
-  --secondary: oklch(0.32 0.08 300 / 45%);
-  --secondary-foreground: oklch(0.98 0.01 320);
-  --muted: oklch(0.28 0.05 295 / 35%);
-  --muted-foreground: oklch(0.85 0.02 310);
+  --secondary: oklch(0.3 0.05 300 / 30%);
+  --secondary-foreground: oklch(0.99 0.01 320);
+  --muted: oklch(0.2 0.04 295 / 25%);
+  --muted-foreground: oklch(0.9 0.02 310);
   --accent: oklch(0.72 0.14 300);
   --accent-foreground: oklch(0.15 0.04 300);
   --destructive: oklch(0.63 0.23 22);
-  --destructive-foreground: oklch(0.98 0.01 320);
-  --border: oklch(1 0 0 / 14%);
-  --input: oklch(1 0 0 / 12%);
+  --destructive-foreground: oklch(0.99 0.01 320);
+  --border: oklch(1 0 0 / 18%);
+  --input: oklch(0 0 0 / 28%);
   --ring: oklch(0.78 0.16 350);
 
-  /* কম অস্বচ্ছতা যাতে পেছনের ছবি ক্রিস্প ফুটে ওঠে */
-  --glass-bg: oklch(0.12 0.03 290 / 30%);
-  --glass-strong: oklch(0.12 0.03 290 / 45%);
-  --glass-border: oklch(1 0 0 / 18%);
-  --shadow-glass: 0 8px 32px 0 oklch(0 0 0 / 25%);
-  --shadow-glow: 0 0 25px -5px oklch(0.74 0.17 355 / 40%);
+  /* সম্পূর্ণ ক্রিস্টাল ক্লিয়ার গ্লাস — কোনো ধোঁয়াটে অস্বচ্ছতা নেই */
+  --glass-bg: oklch(0 0 0 / 24%);
+  --glass-strong: oklch(0 0 0 / 35%);
+  --glass-border: oklch(1 0 0 / 22%);
+  --shadow-glass: 0 8px 30px 0 oklch(0 0 0 / 30%);
+  --shadow-glow: 0 0 20px -5px oklch(0.74 0.17 355 / 35%);
   --gradient-romance: linear-gradient(135deg, oklch(0.76 0.17 355), oklch(0.68 0.16 300));
 }
 
@@ -86,7 +79,7 @@
   }
 
   body {
-    background-color: var(--color-background);
+    background-color: #0b0712;
     color: var(--color-foreground);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
@@ -99,15 +92,16 @@
   h3 {
     font-family: var(--font-display);
     letter-spacing: -0.02em;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
   }
 }
 
-/* মোবাইলে ল্যাগমুক্ত অতি-হালকা ব্লার (২-৩px) */
+/* কোনো ব্লার নেই — পেছনের ব্যাকগ্রাউন্ড ক্রিস্টাল ক্লিয়ার ফুটে উঠবে */
 @utility glass {
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
-  backdrop-filter: blur(3px);
-  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   box-shadow: var(--shadow-glass);
   transform: translateZ(0);
 }
@@ -115,8 +109,8 @@
 @utility glass-strong {
   background: var(--glass-strong);
   border: 1px solid var(--glass-border);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   box-shadow: var(--shadow-glass);
   transform: translateZ(0);
 }
@@ -137,4 +131,3 @@
 @utility text-balance-tight {
   text-wrap: balance;
 }
-
