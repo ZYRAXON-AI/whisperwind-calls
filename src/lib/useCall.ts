@@ -17,6 +17,7 @@ import {
   subscribeRoomCloses,
   broadcastRingBack,
   broadcastInviteDeclined,
+  broadcastInviteCancel,
 } from "./calls";
 import { startRingtone, stopRingtone, unlockSound, getSavedRingtone } from "./sounds";
 import { pushNotify } from "./push";
@@ -69,6 +70,7 @@ export function useCall(userId: string | null) {
   const pendingCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const screenTrackRef = useRef<MediaStreamTrack | null>(null);
   const channelRef = useRef<any>(null);
+  const announcedRef = useRef<Set<string>>(new Set());
   const incomingRef = useRef(incoming);
   const userIdRef = useRef(userId);
   const enteringRef = useRef(false);
@@ -112,6 +114,7 @@ export function useCall(userId: string | null) {
     peerMapRef.current.clear();
     remoteStreamsRef.current = {};
     pendingCandidatesRef.current.clear();
+    announcedRef.current.clear();
     stopInviteRing();
     stopRoomAnnounce();
 
@@ -282,6 +285,7 @@ export function useCall(userId: string | null) {
     async (targetCallId: string, video: boolean) => {
       if (!userId || enteringRef.current) return;
       enteringRef.current = true;
+      const me = userId;
       try {
         stopRingtone();
         await acquireMedia(video);
@@ -304,12 +308,17 @@ export function useCall(userId: string | null) {
           void handleSig(payload);
         })
           .on("broadcast", { event: "joined" }, ({ payload }) => {
-            if (payload?.userId && payload.userId !== userId) {
-              createPeer(payload.userId, userId < payload.userId);
+            const peer = payload?.userId as string | undefined;
+            if (!peer || peer === me) return;
+            const isReply = payload?.reply === true;
+            createPeer(peer, me < peer);
+            if (!isReply && !announcedRef.current.has(peer)) {
+              announcedRef.current.add(peer);
+              ch.send({ type: "broadcast", event: "joined", payload: { userId: me, reply: true } });
             }
           })
           .on("broadcast", { event: "screen" }, ({ payload }) => {
-            if (payload?.userId && payload.userId !== userId) {
+            if (payload?.userId && payload.userId !== me) {
               setPeerSharingScreen(!!payload.screenOn);
             }
           })
@@ -322,15 +331,22 @@ export function useCall(userId: string | null) {
                 } catch {}
                 peerMapRef.current.delete(payload.userId);
               }
+              announcedRef.current.delete(payload.userId);
               const next = { ...remoteStreamsRef.current };
               delete next[payload.userId];
               remoteStreamsRef.current = next;
               setRemoteStreams(next);
+              if (!peerMapRef.current.size) {
+                localCleanup();
+                setStatus("idle");
+                statusRef.current = "idle";
+                setCallId(null);
+              }
             }
           })
           .subscribe(async (s) => {
             if (s === "SUBSCRIBED") {
-              ch.send({ type: "broadcast", event: "joined", payload: { userId } });
+              ch.send({ type: "broadcast", event: "joined", payload: { userId: me } });
             }
           });
 
@@ -340,7 +356,7 @@ export function useCall(userId: string | null) {
         enteringRef.current = false;
       }
     },
-    [acquireMedia, handleSig, createPeer, userId]
+    [acquireMedia, handleSig, createPeer, localCleanup, userId]
   );
 
   const startDmCall = useCallback(
@@ -364,6 +380,7 @@ export function useCall(userId: string | null) {
         [500, 200, 500]
       );
       await enterCall(call.id, video);
+      startRoomAnnounce(call);
     },
     [enterCall, userId]
   );
@@ -382,6 +399,7 @@ export function useCall(userId: string | null) {
       });
       if (!call) throw new Error("Could not create group call room.");
       await enterCall(call.id, video);
+      startRoomAnnounce(call);
     },
     [enterCall, userId]
   );
@@ -401,9 +419,11 @@ export function useCall(userId: string | null) {
     stopRingtone();
     broadcastRingBack(cId, callerId, getSavedRingtone());
     await enterCall(cId, v);
+    setIncoming(null);
+    setIncomingVideo(false);
   }, [enterCall]);
 
-  const decline = useCallback(() => {
+  const decline = useCallback(async () => {
     if (incomingRef.current && userId) {
       broadcastInviteDeclined(incomingRef.current.callId, userId, incomingRef.current.callerId);
     }
@@ -413,8 +433,9 @@ export function useCall(userId: string | null) {
     statusRef.current = "idle";
   }, [userId]);
 
-  const hangup = useCallback(() => {
+  const hangup = useCallback(async () => {
     const curCallId = callIdRef.current;
+    if (!curCallId) return;
     if (channelRef.current) {
       try {
         channelRef.current.send({
@@ -425,6 +446,7 @@ export function useCall(userId: string | null) {
       } catch {}
     }
     if (curCallId) {
+      broadcastInviteCancel(curCallId, userIdRef.current ?? "");
       void endCallRoom(curCallId);
     }
     localCleanup();
@@ -515,6 +537,7 @@ export function useCall(userId: string | null) {
   useEffect(() => {
     if (!userId) return;
     const unsubInvites = subscribeCallInvites((inv) => {
+      if (inv.callerId === userId) return;
       if (statusRef.current !== "idle") return;
       setIncoming({
         callId: inv.callId,
