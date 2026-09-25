@@ -17,6 +17,7 @@ import {
 import { Avatar } from "./Avatar";
 import type { useCall } from "@/lib/useCall";
 import type { Profile } from "@/lib/social";
+import { unlockSound } from "@/lib/sounds";
 
 type Call = ReturnType<typeof useCall>;
 
@@ -33,21 +34,24 @@ function Stream({
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    el.srcObject = stream;
-    // Video elements are visuals only — still kick play() so they don't stall
-    void el.play().catch(() => undefined);
+    el.srcObject = stream ?? null;
+    if (stream) {
+      const playPromise = el.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => undefined);
+      }
+    }
   }, [stream]);
   return <video ref={ref} autoPlay playsInline muted={muted} className={className} />;
 }
 
-// Remote audio MUST live on its own element — every remote's sound plays here
-// (video tiles stay muted so there is exactly one audio path per peer)
 function RemoteAudio({ stream }: { stream: MediaStream | null | undefined }) {
   const ref = useRef<HTMLAudioElement>(null);
   useEffect(() => {
     const el = ref.current;
     if (!el || !stream) return;
     const kick = () => {
+      unlockSound();
       el.muted = false;
       el.volume = 1;
       if (el.srcObject !== stream) el.srcObject = stream;
@@ -61,20 +65,15 @@ function RemoteAudio({ stream }: { stream: MediaStream | null | undefined }) {
     kick();
     const onAdd = () => kick();
     stream.addEventListener("addtrack", onAdd);
-    // Autoplay can block until a gesture/tab is visible — keep knocking until
-    // the element is actually playing (no fixed retry cap)
     const timer = window.setInterval(() => {
       if (el.paused || el.muted) kick();
-    }, 900);
+    }, 800);
     const onGesture = () => kick();
-    const onVisible = () => kick();
     document.addEventListener("pointerdown", onGesture, { once: true });
-    document.addEventListener("visibilitychange", onVisible);
     return () => {
       stream.removeEventListener("addtrack", onAdd);
       window.clearInterval(timer);
       document.removeEventListener("pointerdown", onGesture);
-      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [stream]);
   if (!stream) return null;
@@ -82,7 +81,7 @@ function RemoteAudio({ stream }: { stream: MediaStream | null | undefined }) {
 }
 
 function hasVideoTrack(stream: MediaStream | null | undefined) {
-  return Boolean(stream?.getVideoTracks().length);
+  return Boolean(stream && stream.getVideoTracks().some((t) => t.readyState === "live" && t.enabled));
 }
 
 function ParticipantTile({
@@ -109,23 +108,22 @@ function ParticipantTile({
     <div
       className={`relative overflow-hidden ${
         circle ? "rounded-full" : "rounded-3xl"
-      } border border-white/15 bg-black/50 shadow-inner ${className}`}
+      } border border-white/20 bg-black/40 shadow-inner ${className}`}
     >
       {showVideo && stream ? (
-        // Always muted — every peer's sound comes through RemoteAudio instead
-        <Stream stream={stream} muted className="h-full w-full object-cover" />
+        <Stream stream={stream} muted className="h-full w-full object-contain bg-black" />
       ) : (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-4">
           <Avatar profile={profile} className="h-20 w-20 sm:h-24 sm:w-24" />
-          <span className="max-w-full truncate text-sm font-semibold text-white/90">{name}</span>
+          <span className="max-w-full truncate text-sm font-semibold text-white/90 drop-shadow-md">{name}</span>
         </div>
       )}
       {sharing && (
-        <span className="absolute top-2 left-2 flex items-center gap-1 rounded-lg bg-primary/85 px-2 py-0.5 text-[10px] font-bold text-white">
+        <span className="absolute top-2 left-2 flex items-center gap-1 rounded-lg bg-primary/90 px-2 py-0.5 text-[10px] font-bold text-white shadow">
           <Tv className="h-3 w-3" /> Screen
         </span>
       )}
-      <span className="absolute bottom-2 left-2 flex items-center gap-1 rounded-lg bg-black/60 px-2 py-0.5 text-[10px] font-semibold text-white/90 backdrop-blur-sm">
+      <span className="absolute bottom-2 left-2 flex items-center gap-1 rounded-lg bg-black/70 px-2 py-0.5 text-[10px] font-semibold text-white backdrop-blur-sm">
         {muted ? <MicOff className="h-3 w-3 text-red-400" /> : <Mic className="h-3 w-3" />}
         <span className="max-w-[10rem] truncate">{name}{isSelf ? " (You)" : ""}</span>
       </span>
@@ -152,20 +150,18 @@ export function CallPanel({
   const remoteIds = useMemo(() => Object.keys(call.remoteStreams), [call.remoteStreams]);
   const participantCount = remoteIds.length + (call.localStream ? 1 : 0);
   const displayName = (id: string) =>
-    profiles[id]?.display_name ?? (id && id === call.incoming?.callerId ? callerName ?? peerName : "Someone");
+    profiles[id]?.display_name ?? (id && id === call.incoming?.callerId ? callerName ?? peerName : "Friend");
 
   if (call.status === "idle") return null;
 
-  // One <audio> pump per remote — video or audio, sound always has a home
   const remoteAudioNodes = remoteIds.map((id) => (
     <RemoteAudio key={`audio-${id}`} stream={call.remoteStreams[id]} />
   ));
 
-  // Incoming Call Dialog
   if (call.status === "incoming") {
     const fromName = callerName ?? (call.incoming ? profiles[call.incoming.callerId]?.display_name : undefined) ?? peerName;
     return (
-      <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 px-5">
+      <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-5 backdrop-blur-[2px]">
         <div className="glass-strong glow w-full max-w-sm rounded-3xl p-8 text-center animate-bounce-short">
           <div className="relative mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/20 text-primary">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/40 opacity-75" />
@@ -185,9 +181,7 @@ export function CallPanel({
                 setBusy("decline");
                 void call
                   .decline()
-                  .catch(() => {
-                    toast.error("Could not decline the call");
-                  })
+                  .catch(() => toast.error("Could not decline the call"))
                   .finally(() => setBusy(null));
               }}
               className="grid h-14 w-14 place-items-center rounded-full bg-destructive text-destructive-foreground shadow-lg transition hover:scale-105 active:scale-95 disabled:opacity-60"
@@ -201,6 +195,7 @@ export function CallPanel({
               onClick={() => {
                 if (busy) return;
                 setBusy("accept");
+                unlockSound();
                 void call
                   .accept()
                   .catch((err: unknown) => {
@@ -292,7 +287,6 @@ export function CallPanel({
           : "Connecting…"
       : `Connected · ${participantCount} in call`;
 
-  // Minimized PiP Mode
   if (isMinimized) {
     const firstId = remoteIds[0];
     const firstRemote = firstId ? call.remoteStreams[firstId] : undefined;
@@ -316,7 +310,7 @@ export function CallPanel({
 
         <div className="relative mt-2 h-36 w-full overflow-hidden rounded-2xl bg-black">
           {hasVideoTrack(firstRemote ?? null) && firstRemote ? (
-            <Stream stream={firstRemote} muted className="h-full w-full object-cover" />
+            <Stream stream={firstRemote} muted className="h-full w-full object-contain" />
           ) : (
             <div className="flex h-full w-full flex-col items-center justify-center gap-2">
               <Users className="h-6 w-6 text-primary" />
@@ -349,16 +343,21 @@ export function CallPanel({
           )}
           <button
             type="button"
-            disabled={busy === "hangup"}
             onClick={() => {
-              if (busy) return;
-              setBusy("hangup");
-              void call
-                .hangup()
-                .catch(() => toast.error("Could not leave the call"))
-                .finally(() => setBusy(null));
+              if (call.sharingScreen) {
+                void call.stopScreenShare();
+              } else {
+                void call.shareScreen();
+              }
             }}
-            className="grid h-9 w-9 place-items-center rounded-full bg-destructive text-white shadow disabled:opacity-60"
+            className={`grid h-9 w-9 place-items-center rounded-full ${call.sharingScreen ? "bg-primary text-white" : "glass"}`}
+          >
+            <MonitorUp className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => void call.hangup()}
+            className="grid h-9 w-9 place-items-center rounded-full bg-destructive text-white"
           >
             <PhoneOff className="h-4 w-4" />
           </button>
@@ -367,100 +366,50 @@ export function CallPanel({
     );
   }
 
-  // Fullscreen Call Window — video grid or audio avatar grid
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black/85">
+    <div className="fixed inset-0 z-50 flex flex-col bg-black/85 backdrop-blur-[2px]">
       {remoteAudioNodes}
-      <div className="flex items-center justify-between px-6 pt-4 pb-2">
-        <div className="flex items-center gap-2 text-sm text-white/80">
-          <span className="h-2.5 w-2.5 rounded-full bg-green-500 animate-ping" />
-          <span>{statusText}</span>
+      <div className="flex items-center justify-between p-4 text-white">
+        <div className="flex items-center gap-3">
+          <span className="flex h-3 w-3 relative">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500" />
+          </span>
+          <span className="text-sm font-medium">{statusText}</span>
         </div>
-        <button
-          type="button"
-          onClick={() => setIsMinimized(true)}
-          className="glass flex items-center gap-1.5 rounded-2xl px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-white/20 transition"
-          title="Minimize & continue chatting"
-        >
-          <Minimize2 className="h-4 w-4" />
-          <span>Minimize & Chat</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setIsMinimized(true)}
+            className="glass grid h-10 w-10 place-items-center rounded-full text-white hover:bg-white/20"
+            title="Minimize call"
+          >
+            <Minimize2 className="h-5 w-5" />
+          </button>
+        </div>
       </div>
 
-      <div className="relative min-h-0 flex-1 overflow-hidden p-2 sm:p-4">
-        {call.status === "calling" && remoteIds.length === 0 && (
-          <div className="absolute inset-0 z-10 grid place-items-center">
-            <p className="glass rounded-3xl px-6 py-3 text-base font-semibold shadow-xl text-white">
-              {call.outgoing ? `Ringing ${callerName ?? peerName}…` : "Connecting…"}
-            </p>
-          </div>
+      <div className="flex-1 p-4 grid gap-4 grid-cols-1 md:grid-cols-2 overflow-auto">
+        {call.localStream && (
+          <ParticipantTile
+            stream={call.localStream}
+            name="You"
+            profile={selfProfile}
+            isSelf
+            sharing={call.sharingScreen}
+            muted={!call.micOn}
+          />
         )}
-
-        {call.withVideo ? (
-          /* Video: grid of remote tiles + self PiP bottom-right */
-          <>
-            <div className="grid h-full w-full gap-2 sm:gap-3" style={{ gridTemplateColumns: `repeat(auto-fit, minmax(${remoteIds.length > 4 ? "160px" : "240px"}, 1fr))` }}>
-              {remoteIds.length === 0 ? (
-                <div className="col-span-full grid h-full place-items-center">
-                  <div className="flex flex-col items-center gap-3 text-white/70">
-                    <Users className="h-10 w-10 text-primary" />
-                    <p className="text-sm">Waiting for others to join…</p>
-                  </div>
-                </div>
-              ) : (
-                remoteIds.map((id) => (
-                  <ParticipantTile
-                    key={id}
-                    stream={call.remoteStreams[id]}
-                    name={displayName(id)}
-                    profile={profiles[id]}
-                    sharing={call.peerSharingScreen}
-                  />
-                ))
-              )}
-            </div>
-
-            <div className="glass-strong absolute bottom-6 right-6 h-36 w-24 overflow-hidden rounded-2xl shadow-2xl sm:h-48 sm:w-36 border border-white/20">
-              <Stream stream={call.localStream} muted className="h-full w-full object-cover" />
-            </div>
-
-            {call.peerSharingScreen && (
-              <div className="absolute top-6 left-6 flex items-center gap-2 rounded-2xl bg-black/70 px-4 py-2 text-xs font-semibold text-white backdrop-blur-md">
-                <Tv className="h-4 w-4 text-primary" />
-                <span>Screen is being shared</span>
-              </div>
-            )}
-          </>
-        ) : (
-          /* Audio: avatar grid of all participants */
-          <div className="scroll-soft grid h-full w-full content-center justify-items-center gap-4 overflow-y-auto p-4 sm:gap-6" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
-            <ParticipantTile
-              stream={call.localStream}
-              name={selfProfile?.display_name ?? "You"}
-              profile={selfProfile}
-              isSelf
-              muted={!call.micOn}
-              circle
-              className="mx-auto h-40 w-40 sm:h-48 sm:w-48"
-            />
-            {remoteIds.map((id) => (
-              <ParticipantTile
-                key={id}
-                stream={call.remoteStreams[id]}
-                name={displayName(id)}
-                profile={profiles[id]}
-                sharing={call.peerSharingScreen}
-                circle
-                className="mx-auto h-40 w-40 sm:h-48 sm:w-48"
-              />
-            ))}
-            {remoteIds.length === 0 && (
-              <div className="col-span-full text-center text-sm text-white/70">
-                Waiting for others to join…
-              </div>
-            )}
-          </div>
-        )}
+        {remoteIds.map((id) => (
+          <ParticipantTile
+            key={id}
+            stream={call.remoteStreams[id]}
+            name={displayName(id)}
+            profile={profiles[id]}
+            sharing={call.peerSharingScreen}
+            muted={false}
+          />
+        ))}
       </div>
 
       {controls}
