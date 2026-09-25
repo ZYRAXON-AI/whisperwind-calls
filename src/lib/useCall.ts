@@ -190,6 +190,47 @@ export function useCall(userId: string | null) {
     withVideoRef.current = withVideo;
   }, [withVideo]);
 
+  // Pre-acquire mic/cam while the incoming dialog is ringing, so Accept lands
+  // instantly with zero getUserMedia delay. Stored against the matching callId.
+  const preloadRef = useRef<{ callId: string; video: boolean; stream: MediaStream } | null>(null);
+
+  const stopPreload = useCallback(() => {
+    const p = preloadRef.current;
+    preloadRef.current = null;
+    if (p) {
+      p.stream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {}
+      });
+    }
+  }, []);
+
+  const preloadIncoming = useCallback(
+    async (callId: string, video: boolean) => {
+      // Only preload for a NEW ring — never while we're in/entering a live call
+      if (statusRef.current !== "idle" || callIdRef.current) return;
+      if (preloadRef.current?.callId === callId && preloadRef.current.video === video) return;
+      stopPreload();
+      try {
+        const stream = await acquireMedia(video);
+        // User may have declined/cancelled while the camera was opening — drop it
+        if (statusRef.current !== "incoming") {
+          stream.getTracks().forEach((t) => {
+            try {
+              t.stop();
+            } catch {}
+          });
+          return;
+        }
+        preloadRef.current = { callId, video, stream };
+      } catch {
+        preloadRef.current = null;
+      }
+    },
+    [stopPreload]
+  );
+
   // When WE are the callee: answer the invite with our own saved ringtone so
   // the caller hears it on their side (sent twice — broadcasts can drop)
   const announceRingBack = useCallback((callId: string, callerId: string) => {
@@ -347,7 +388,7 @@ export function useCall(userId: string | null) {
       // the SAME offer (throttled) instead of deadlocking in have-local-offer.
       if (pc.signalingState === "have-local-offer" && pc.localDescription && !iceRestart) {
         const last = lastOfferSentRef.current.get(peerId) ?? 0;
-        if (Date.now() - last > 1500) {
+        if (Date.now() - last > 600) {
           lastOfferSentRef.current.set(peerId, Date.now());
           send({ to: peerId, kind: "offer", sdp: pc.localDescription });
           sendStoredIce(peerId);
@@ -607,6 +648,7 @@ export function useCall(userId: string | null) {
 
   const localCleanup = useCallback(() => {
     const endedId = callIdRef.current;
+    stopPreload();
     Array.from(pcsRef.current.keys()).forEach((id) => closePeer(id));
     const ch = callChannelRef.current;
     if (ch) {
@@ -654,7 +696,7 @@ export function useCall(userId: string | null) {
     setCamOn(true);
     setOutgoing(false);
     setPeerRingtone("");
-  }, [closePeer, publishRemotes]);
+  }, [closePeer, publishRemotes, stopPreload]);
 
   const joinChannel = useCallback(
     (callId: string): Promise<void> => {
@@ -767,12 +809,13 @@ export function useCall(userId: string | null) {
         });
         setIncomingVideo(inv.call.with_video);
         setCallerRingtone(inv.call.ringtone);
+        void preloadIncoming(inv.call.id, inv.call.with_video);
         statusRef.current = "incoming";
         setStatus("incoming");
         announceRingBack(inv.call.id, inv.call.created_by);
       }
     },
-    [announceRingBack, localCleanup, userId]
+    [announceRingBack, localCleanup, preloadIncoming, userId]
   );
 
   // realtime invites (broadcast bus + personal inbox) + call status + initial load
@@ -860,6 +903,7 @@ export function useCall(userId: string | null) {
       });
       setIncomingVideo(inv.withVideo);
       setCallerRingtone(inv.ringtone);
+      void preloadIncoming(inv.callId, inv.withVideo);
       statusRef.current = "incoming";
       setStatus("incoming");
       announceRingBack(inv.callId, inv.callerId);
@@ -869,6 +913,7 @@ export function useCall(userId: string | null) {
       setJoinableCalls((prev) => prev.filter((row) => row.id !== c.callId));
       if (incomingRef.current?.callId === c.callId) {
         stopRingtone();
+        stopPreload();
         setIncoming(null);
         setIncomingVideo(false);
         if (statusRef.current === "incoming") {
@@ -898,6 +943,7 @@ export function useCall(userId: string | null) {
       setJoinableCalls((prev) => prev.filter((c) => c.id !== p.callId));
       if (incomingRef.current?.callId === p.callId) {
         stopRingtone();
+        stopPreload();
         setIncoming(null);
         setIncomingVideo(false);
         if (statusRef.current === "incoming") {
@@ -926,7 +972,7 @@ export function useCall(userId: string | null) {
       offInbox();
       supabase.removeChannel(ch);
     };
-  }, [announceRingBack, loadOpenCalls, userId]);
+  }, [announceRingBack, loadOpenCalls, preloadIncoming, stopPreload, userId]);
 
   const enteringRef = useRef(false);
 
@@ -947,12 +993,26 @@ export function useCall(userId: string | null) {
           localCleanup();
         }
 
+        // Consume the media preloaded while the incoming dialog was ringing →
+        // Accept has zero getUserMedia delay (instant "Connected")
         let stream: MediaStream;
-        try {
-          stream = await acquireMedia(video);
-        } catch (err) {
-          localCleanup();
-          throw new Error(mediaErrorMessage(err, video));
+        const pre = preloadRef.current;
+        if (pre && pre.callId === callId && pre.video === video) {
+          preloadRef.current = null;
+          stream = pre.stream;
+          stream.getTracks().forEach((t) => {
+            try {
+              t.enabled = true;
+            } catch {}
+          });
+        } else {
+          if (pre) stopPreload();
+          try {
+            stream = await acquireMedia(video);
+          } catch (err) {
+            localCleanup();
+            throw new Error(mediaErrorMessage(err, video));
+          }
         }
 
         localRef.current = stream;
@@ -1044,7 +1104,7 @@ export function useCall(userId: string | null) {
         enteringRef.current = false;
       }
     },
-    [discoverPeer, joinChannel, localCleanup, logCallEvent, userId]
+    [discoverPeer, joinChannel, localCleanup, logCallEvent, stopPreload, userId]
   );
 
   enterCallRef.current = enterCall;
@@ -1137,8 +1197,10 @@ export function useCall(userId: string | null) {
     declinedCallIdsRef.current.add(id);
     setIncoming(null);
     setIncomingVideo(false);
+    statusRef.current = "idle";
     setStatus("idle");
     stopRingtone();
+    stopPreload();
     try {
       navigator.vibrate?.(0);
     } catch {}
@@ -1148,7 +1210,7 @@ export function useCall(userId: string | null) {
     broadcastInviteDeclined(id, userId, caller);
     void setMemberState(id, userId, "declined").catch(() => undefined);
     void loadOpenCalls(true);
-  }, [incoming, loadOpenCalls, logCallEvent, userId]);
+  }, [incoming, loadOpenCalls, logCallEvent, stopPreload, userId]);
 
   const joinCall = useCallback(
     async (callId: string) => {
@@ -1289,7 +1351,7 @@ export function useCall(userId: string | null) {
         }
         if (ld.type === "offer" && pc.signalingState === "have-local-offer") {
           const last = lastOfferSentRef.current.get(id) ?? 0;
-          if (Date.now() - last > 1200) {
+          if (Date.now() - last > 500) {
             lastOfferSentRef.current.set(id, Date.now());
             send({ to: id, kind: "offer", sdp: ld });
           }

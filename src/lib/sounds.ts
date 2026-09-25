@@ -1,8 +1,13 @@
 // Notification & ringtone sounds that work in background tabs and mobile devices.
+// Ringtones loop a pre-rendered WebAudio buffer (AudioBufferSourceNode.loop=true).
+// Buffer sources are NOT throttled in hidden background tabs the way setInterval is,
+// so the callee keeps hearing the ring continuously until they answer or hang up.
 let ctx: AudioContext | null = null;
-let ringTimer: ReturnType<typeof setInterval> | null = null;
+let ringSource: AudioBufferSourceNode | null = null;
 let previewTimer: ReturnType<typeof setTimeout> | null = null;
+let ringWatchdog: ReturnType<typeof setInterval> | null = null;
 let activeRingtone = "";
+const ringBufferCache = new Map<string, AudioBuffer>();
 // YouTube ringtone (yt:VIDEOID) plays via a hidden looping audio iframe
 const ytFrames = new Set<HTMLIFrameElement>();
 
@@ -86,11 +91,21 @@ export function playCallAlert() {
 }
 
 // ---------------- Ringtone presets ----------------
+// notes are rendered into a looping AudioBuffer so the ring is CONTINUOUS:
+// no setInterval, no gaps, immune to background-tab timer throttling.
+export type RingNote = {
+  f: number; // frequency Hz
+  t: number; // start offset (seconds into the loop)
+  d: number; // duration (seconds)
+  v?: number; // volume 0..1 (default 0.25)
+  w?: number; // wave: 0 sine (default) | 1 triangle | 2 sawtooth
+};
+
 export type RingtonePreset = {
   id: string;
   name: string;
   description: string;
-  play: () => void;
+  notes: RingNote[];
 };
 
 export const RINGTONE_PRESETS: RingtonePreset[] = [
@@ -98,63 +113,63 @@ export const RINGTONE_PRESETS: RingtonePreset[] = [
     id: "classic",
     name: "Zyraxon Classic",
     description: "Standard high-frequency classic chime",
-    play: () => {
-      tone(660, 0, 0.35, 0.3);
-      tone(880, 0.4, 0.45, 0.3);
-    },
+    notes: [
+      { f: 660, t: 0, d: 0.35, v: 0.3 },
+      { f: 880, t: 0.4, d: 0.45, v: 0.3 },
+    ],
   },
   {
     id: "romantic",
     name: "Romantic Melody",
     description: "Sweet harp and soft romantic ring",
-    play: () => {
-      tone(523.25, 0.0, 0.2, 0.25, "triangle"); // C5
-      tone(659.25, 0.18, 0.2, 0.25, "triangle"); // E5
-      tone(783.99, 0.36, 0.3, 0.25, "triangle"); // G5
-      tone(1046.5, 0.58, 0.45, 0.28, "sine"); // C6
-    },
+    notes: [
+      { f: 523.25, t: 0.0, d: 0.2, v: 0.25, w: 1 }, // C5
+      { f: 659.25, t: 0.18, d: 0.2, v: 0.25, w: 1 }, // E5
+      { f: 783.99, t: 0.36, d: 0.3, v: 0.25, w: 1 }, // G5
+      { f: 1046.5, t: 0.58, d: 0.45, v: 0.28 }, // C6
+    ],
   },
   {
     id: "cyber",
     name: "Cyber Pulse",
     description: "Futuristic high-tech synth cyber ring",
-    play: () => {
-      tone(440, 0, 0.12, 0.22, "sawtooth");
-      tone(880, 0.12, 0.12, 0.22, "sawtooth");
-      tone(1760, 0.24, 0.2, 0.18, "sine");
-      tone(1320, 0.48, 0.25, 0.2, "sawtooth");
-    },
+    notes: [
+      { f: 440, t: 0, d: 0.12, v: 0.22, w: 2 },
+      { f: 880, t: 0.12, d: 0.12, v: 0.22, w: 2 },
+      { f: 1760, t: 0.24, d: 0.2, v: 0.18 },
+      { f: 1320, t: 0.48, d: 0.25, v: 0.2, w: 2 },
+    ],
   },
   {
     id: "lofi",
     name: "Lo-Fi Dream",
     description: "Relaxing soft dream chimes",
-    play: () => {
-      tone(392, 0.0, 0.3, 0.25, "sine"); // G4
-      tone(587.33, 0.25, 0.35, 0.25, "sine"); // D5
-      tone(659.25, 0.55, 0.4, 0.25, "triangle"); // E5
-    },
+    notes: [
+      { f: 392, t: 0.0, d: 0.3, v: 0.25 }, // G4
+      { f: 587.33, t: 0.25, d: 0.35, v: 0.25 }, // D5
+      { f: 659.25, t: 0.55, d: 0.4, v: 0.25, w: 1 }, // E5
+    ],
   },
   {
     id: "marimba",
     name: "Bright Marimba",
     description: "iPhone-style lively marimba melody",
-    play: () => {
-      tone(659.25, 0, 0.15, 0.3, "sine");
-      tone(587.33, 0.15, 0.15, 0.3, "sine");
-      tone(523.25, 0.3, 0.18, 0.3, "sine");
-      tone(783.99, 0.5, 0.35, 0.35, "sine");
-    },
+    notes: [
+      { f: 659.25, t: 0, d: 0.15, v: 0.3 },
+      { f: 587.33, t: 0.15, d: 0.15, v: 0.3 },
+      { f: 523.25, t: 0.3, d: 0.18, v: 0.3 },
+      { f: 783.99, t: 0.5, d: 0.35, v: 0.35 },
+    ],
   },
   {
     id: "ambient",
     name: "Zen Bells",
     description: "Calming crystal bells",
-    play: () => {
-      tone(1046.5, 0.0, 0.4, 0.2, "sine");
-      tone(1318.51, 0.3, 0.4, 0.2, "sine");
-      tone(1567.98, 0.6, 0.5, 0.25, "sine");
-    },
+    notes: [
+      { f: 1046.5, t: 0.0, d: 0.4, v: 0.2 },
+      { f: 1318.51, t: 0.3, d: 0.4, v: 0.2 },
+      { f: 1567.98, t: 0.6, d: 0.5, v: 0.25 },
+    ],
   },
 ];
 
@@ -171,9 +186,9 @@ export function setSavedRingtone(id: string) {
 }
 
 // Play a YouTube ringtone (yt:VIDEOID) via ONE hidden looping iframe.
-// Browsers block unmuted iframe autoplay until a user gesture, so we keep
-// retrying a native WebAudio "ringing" melody alongside it — the callee is
-// guaranteed to HEAR the call even if the music video can't auto-play.
+// Browsers block unmuted iframe autoplay until a user gesture, so we keep a
+// looping native "ringing" melody running underneath — the callee is guaranteed
+// to HEAR the call even if the music video can't auto-play.
 function playYoutubeRingtone(videoId: string) {
   if (typeof document === "undefined") return;
   stopYoutubeRingtone();
@@ -197,63 +212,109 @@ function stopYoutubeRingtone() {
   ytFrames.clear();
 }
 
+// Render one preset's notes into a cached AudioBuffer (a single looping voice)
+function renderRingBuffer(c: AudioContext, presetId: string, notes: RingNote[]): AudioBuffer {
+  const key = `${presetId}:${c.sampleRate}`;
+  const cached = ringBufferCache.get(key);
+  if (cached) return cached;
+  const end = notes.reduce((m, n) => Math.max(m, n.t + n.d), 0) + 0.2;
+  const sr = c.sampleRate;
+  const len = Math.max(1, Math.ceil(end * sr));
+  const buf = c.createBuffer(1, len, sr);
+  const data = buf.getChannelData(0);
+  for (const n of notes) {
+    const w = n.w ?? 0;
+    const v = n.v ?? 0.25;
+    const startS = Math.max(0, Math.floor(n.t * sr));
+    const durS = Math.max(1, Math.ceil(n.d * sr));
+    for (let i = 0; i < durS; i++) {
+      const idx = startS + i;
+      if (idx >= len) break;
+      const tt = i / sr;
+      // quick attack + release so each note has a musical envelope
+      const attack = Math.min(1, tt / 0.02);
+      const release = Math.max(0, Math.min(1, (n.d - tt) / 0.15));
+      let sample: number;
+      if (w === 1) sample = (2 / Math.PI) * Math.asin(Math.sin(2 * Math.PI * n.f * tt));
+      else if (w === 2) sample = 2 * ((n.f * tt) % 1) - 1;
+      else sample = Math.sin(2 * Math.PI * n.f * tt);
+      data[idx] += sample * v * attack * release;
+    }
+  }
+  ringBufferCache.set(key, buf);
+  return buf;
+}
+
+// Only a watchdog that resumes a suspended context — the loop itself never stops.
+// Chrome does NOT throttle a playing AudioBufferSourceNode in a hidden tab, so the
+// loop keeps ringing; we only need to rescue context suspension (iOS/mobile).
+function startWatchdog() {
+  if (ringWatchdog) return;
+  ringWatchdog = setInterval(() => {
+    const c = ctx;
+    if (!c) return;
+    if (c.state === "suspended") void c.resume();
+  }, 1200);
+}
+
+function stopLoopSource() {
+  if (ringWatchdog) {
+    clearInterval(ringWatchdog);
+    ringWatchdog = null;
+  }
+  const s = ringSource;
+  ringSource = null;
+  activeRingtone = "";
+  if (s) {
+    try {
+      s.stop();
+    } catch {}
+    try {
+      s.disconnect();
+    } catch {}
+  }
+}
+
+// Start an endlessly looping version of a preset on the shared context.
+// requestedId keeps the idempotency key == what the user asked for (e.g. yt:ID).
+function startLoopRing(preset: RingtonePreset, requestedId?: string) {
+  stopLoopSource();
+  const c = audio();
+  if (!c) return;
+  const src = c.createBufferSource();
+  src.buffer = renderRingBuffer(c, preset.id, preset.notes);
+  src.loop = true;
+  const gain = c.createGain();
+  gain.gain.value = 1;
+  gain.connect(c.destination);
+  src.connect(gain);
+  src.start();
+  ringSource = src;
+  activeRingtone = requestedId ?? preset.id;
+  startWatchdog();
+}
+
 // Play the caller-selected ringtone (preset id or yt:VIDEOID)
 export function startRingtone(presetId?: string) {
   const id = presetId || getSavedRingtone();
-  // Restart when the caller changes the tone — never stick on the old preset
-  if (ringTimer) {
-    stopRingtone();
-  }
   unlockSound();
   const c = audio();
-  if (c && c.state === "suspended") void c.resume();
-
-  // YouTube ringtone: music video iframe + native ringing fallback melody.
-  // If the browser blocks the unmuted iframe (autoplay policy), the callee
-  // still hears a real "ring" via WebAudio once audio is unlocked.
+  if (!c) return;
+  // Already looping this exact tone with a live context — don't restart (no gaps)
+  if (activeRingtone === id && ringSource && ctx?.state === "running") return;
   if (id.startsWith("yt:")) {
-    const tune = RINGTONE_PRESETS[0]!;
-    const ringFallback = () => {
-      const cc = audio();
-      if (cc && cc.state === "suspended") {
-        cc.resume()
-          .then(() => {
-            if (ringTimer) tune.play();
-          })
-          .catch(() => undefined);
-        return;
-      }
-      tune.play();
-    };
+    stopLoopSource();
     playYoutubeRingtone(id.slice(3));
-    ringFallback();
-    ringTimer = setInterval(ringFallback, 1800);
+    startLoopRing(RINGTONE_PRESETS[0]!, id);
     return;
   }
-
-  const tune = RINGTONE_PRESETS.find((p) => p.id === id) || RINGTONE_PRESETS[0]!;
-
-  const keepAlive = () => {
-    const cc = audio();
-    if (cc && cc.state === "suspended") {
-      // Resume then replay once so a locked/suspended AudioContext still rings
-      cc.resume()
-        .then(() => {
-          if (ringTimer) tune.play();
-        })
-        .catch(() => undefined);
-      return;
-    }
-    tune.play();
-  };
-
-  tune.play();
-  ringTimer = setInterval(keepAlive, 1800);
+  const preset = RINGTONE_PRESETS.find((p) => p.id === id) || RINGTONE_PRESETS[0]!;
+  stopLoopSource();
+  startLoopRing(preset, id);
 }
 
 export function stopRingtone() {
-  if (ringTimer) clearInterval(ringTimer);
-  ringTimer = null;
+  stopLoopSource();
   if (previewTimer) clearTimeout(previewTimer);
   previewTimer = null;
   stopYoutubeRingtone();
@@ -263,13 +324,13 @@ export function previewRingtone(presetId: string) {
   stopRingtone();
   if (presetId.startsWith("yt:")) {
     playYoutubeRingtone(presetId.slice(3));
-    previewTimer = setTimeout(() => {
-      stopRingtone();
-    }, 1700);
-    return;
+    startLoopRing(RINGTONE_PRESETS[0]!, presetId);
+  } else {
+    startLoopRing(
+      RINGTONE_PRESETS.find((p) => p.id === presetId) ?? RINGTONE_PRESETS[0]!,
+      presetId
+    );
   }
-  const tune = RINGTONE_PRESETS.find((p) => p.id === presetId) || RINGTONE_PRESETS[0];
-  tune.play();
   previewTimer = setTimeout(() => {
     stopRingtone();
   }, 1700);

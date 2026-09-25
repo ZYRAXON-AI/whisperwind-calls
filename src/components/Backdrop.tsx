@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { nextWallpaper, type Wallpaper } from "@/lib/backgrounds";
 
-const ROTATE_MS = 15000;
+const ROTATE_MS = 60000;
 const POOL = 6;
 
 export function Backdrop() {
@@ -20,9 +20,10 @@ export function Backdrop() {
     };
   }, []);
 
-  // Every 15s preload a brand-new random picture, then crossfade to it
+  // Every 60s preload a brand-new random picture, then crossfade to it
   useEffect(() => {
     const t = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
       void (async () => {
         const next = await nextWallpaper();
         if (!aliveRef.current || !next) return;
@@ -45,6 +46,7 @@ export function Backdrop() {
           key={shot.id}
           src={shot.url}
           alt=""
+          decoding="async"
           className={`absolute inset-0 h-full w-full scale-105 object-cover transition-opacity duration-[2000ms] ${
             i === active ? "opacity-100" : "opacity-0"
           }`}

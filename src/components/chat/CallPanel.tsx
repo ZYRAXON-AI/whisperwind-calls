@@ -165,7 +165,7 @@ export function CallPanel({
   if (call.status === "incoming") {
     const fromName = callerName ?? (call.incoming ? profiles[call.incoming.callerId]?.display_name : undefined) ?? peerName;
     return (
-      <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 px-5 backdrop-blur-sm">
+      <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 px-5">
         <div className="glass-strong glow w-full max-w-sm rounded-3xl p-8 text-center animate-bounce-short">
           <div className="relative mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/20 text-primary">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/40 opacity-75" />
@@ -285,7 +285,11 @@ export function CallPanel({
 
   const statusText =
     call.status === "calling"
-      ? "Waiting for others to join…"
+      ? remoteIds.length > 0
+        ? "Connecting…"
+        : call.outgoing
+          ? "Waiting for others to join…"
+          : "Connecting…"
       : `Connected · ${participantCount} in call`;
 
   // Minimized PiP Mode
@@ -365,7 +369,7 @@ export function CallPanel({
 
   // Fullscreen Call Window — video grid or audio avatar grid
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black/85 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex flex-col bg-black/85">
       {remoteAudioNodes}
       <div className="flex items-center justify-between px-6 pt-4 pb-2">
         <div className="flex items-center gap-2 text-sm text-white/80">
@@ -387,7 +391,7 @@ export function CallPanel({
         {call.status === "calling" && remoteIds.length === 0 && (
           <div className="absolute inset-0 z-10 grid place-items-center">
             <p className="glass rounded-3xl px-6 py-3 text-base font-semibold shadow-xl text-white">
-              {call.withVideo ? "Starting video call…" : "Starting audio call…"}
+              {call.outgoing ? `Ringing ${callerName ?? peerName}…` : "Connecting…"}
             </p>
           </div>
         )}

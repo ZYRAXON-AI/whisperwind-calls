@@ -259,14 +259,22 @@ export function ChatRoom({
     call.peerRingtone,
   ]);
 
-  // Background tab → user returns while the call is STILL incoming:
-  // restart the ringtone, because browsers pause sounds in hidden tabs.
+  // Background tab → user returns while the call is still ringing (incoming OR
+  // outgoing-caller): restart the ringtone, because some browsers pause audio in
+  // hidden tabs. Any click/key press also re-unlocks audio and restarts the loop.
   useEffect(() => {
-    if (call.status !== "incoming") return;
+    const ringing = call.status === "incoming" || (call.status === "calling" && call.outgoing);
+    if (!ringing) return;
+    const tone =
+      call.status === "incoming" ? call.callerRingtone : call.peerRingtone || getSavedRingtone();
+    const restart = () => {
+      unlockSound();
+      startRingtone(tone);
+    };
     const onVisible = () => {
-      if (document.visibilityState === "visible") {
-        unlockSound();
-        startRingtone(call.callerRingtone);
+      if (document.visibilityState !== "visible") return;
+      restart();
+      if (call.status === "incoming") {
         try {
           navigator.vibrate?.([500, 200, 500, 200, 700]);
         } catch {}
@@ -274,11 +282,15 @@ export function ChatRoom({
     };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
+    document.addEventListener("pointerdown", restart);
+    document.addEventListener("keydown", restart);
     return () => {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
+      document.removeEventListener("pointerdown", restart);
+      document.removeEventListener("keydown", restart);
     };
-  }, [call.status, call.callerRingtone]);
+  }, [call.status, call.callerRingtone, call.outgoing, call.peerRingtone]);
 
   const friendIds = useMemo(() => friendIdsOf(friendships, user.id), [friendships, user.id]);
   const friends = friendIds.map((id) => profiles[id]).filter(Boolean) as Profile[];
