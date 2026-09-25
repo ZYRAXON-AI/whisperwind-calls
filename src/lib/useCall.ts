@@ -1,73 +1,27 @@
-// ==========================================
-// ফাইল ২: src/lib/useCall.ts (সম্পূর্ণ নির্ভুল কোড)
-// ==========================================
-
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import {
-  CallRow,
+  type CallRow,
   createCall,
-  endCallRow,
-  fetchCallRow,
+  endCallRoom,
   fetchMyOpenCalls,
-  leaveCallRow,
   setCallActive,
   startInviteRing,
+  stopInviteRing,
   startRoomAnnounce,
-  subscribeToInvites,
-  subscribeToRooms,
-  announceRingBack,
+  stopRoomAnnounce,
+  subscribeCallInvites,
+  subscribeInviteCancels,
+  subscribeRoomOpens,
+  subscribeRoomCloses,
+  broadcastRingBack,
   broadcastInviteDeclined,
 } from "./calls";
-import {
-  startRingtone,
-  stopRingtone,
-  playCallConnectSound,
-  playCallEndSound,
-  unlockSound,
-  getSavedRingtone,
-} from "./sounds";
+import { startRingtone, stopRingtone, unlockSound, getSavedRingtone } from "./sounds";
 import { pushNotify } from "./push";
 import { requestMediaPermissions } from "./permissions";
 
 export type CallStatus = "idle" | "calling" | "incoming" | "connected";
-
-export interface RemoteParticipant {
-  userId: string;
-  stream: MediaStream;
-  micOn: boolean;
-  camOn: boolean;
-  screenOn: boolean;
-}
-
-export interface UseCallReturn {
-  status: CallStatus;
-  isCaller: boolean;
-  withVideo: boolean;
-  localStream: MediaStream | null;
-  remoteParticipants: RemoteParticipant[];
-  screenSharing: boolean;
-  micMuted: boolean;
-  camOff: boolean;
-  callId: string | null;
-  incoming: { callId: string; callerId: string; withVideo: boolean; ringtone?: string } | null;
-  joinableCalls: CallRow[];
-  callerRingtone?: string;
-  peerRingtone?: string;
-  outgoing: boolean;
-  remoteAudioStreams: { peerId: string; stream: MediaStream }[];
-
-  startDmCall: (peerId: string, video: boolean) => Promise<void>;
-  startGroupCall: (inviteeIds: string[], video: boolean) => Promise<void>;
-  joinCall: (callId: string) => Promise<void>;
-  acceptCall: () => Promise<void>;
-  declineCall: () => void;
-  hangup: () => void;
-  toggleMic: () => void;
-  toggleCam: () => void;
-  shareScreen: () => Promise<void>;
-  stopScreenShare: () => void;
-}
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
@@ -84,14 +38,15 @@ const ICE_SERVERS: RTCIceServer[] = [
   },
 ];
 
-export function useCall(userId: string | null): UseCallReturn {
+export function useCall(userId: string | null) {
   const [status, setStatus] = useState<CallStatus>("idle");
   const [withVideo, setWithVideo] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [remoteParticipants, setRemoteParticipants] = useState<RemoteParticipant[]>([]);
-  const [screenSharing, setScreenSharing] = useState(false);
-  const [micMuted, setMicMuted] = useState(false);
-  const [camOff, setCamOff] = useState(false);
+  const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+  const [sharingScreen, setSharingScreen] = useState(false);
+  const [peerSharingScreen, setPeerSharingScreen] = useState(false);
+  const [micOn, setMicOn] = useState(true);
+  const [camOn, setCamOn] = useState(true);
   const [callId, setCallId] = useState<string | null>(null);
   const [incoming, setIncoming] = useState<{
     callId: string;
@@ -109,14 +64,10 @@ export function useCall(userId: string | null): UseCallReturn {
   const statusRef = useRef<CallStatus>("idle");
   const localStreamRef = useRef<MediaStream | null>(null);
   const peerMapRef = useRef<Map<string, RTCPeerConnection>>(new Map());
-  const remoteMapRef = useRef<Map<string, RemoteParticipant>>(new Map());
+  const remoteStreamsRef = useRef<Record<string, MediaStream>>({});
   const pendingCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const screenTrackRef = useRef<MediaStreamTrack | null>(null);
   const channelRef = useRef<any>(null);
-  const ringStopperRef = useRef<(() => void) | null>(null);
-  const announceStopperRef = useRef<(() => void) | null>(null);
-  const lastCallRowRef = useRef<CallRow | null>(null);
-  const peerIdRef = useRef<string | null>(null);
   const incomingRef = useRef(incoming);
   const userIdRef = useRef(userId);
   const enteringRef = useRef(false);
@@ -124,12 +75,15 @@ export function useCall(userId: string | null): UseCallReturn {
   useEffect(() => {
     userIdRef.current = userId;
   }, [userId]);
+
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
   useEffect(() => {
     callIdRef.current = callId;
   }, [callId]);
+
   useEffect(() => {
     incomingRef.current = incoming;
   }, [incoming]);
@@ -155,17 +109,11 @@ export function useCall(userId: string | null): UseCallReturn {
       } catch {}
     }
     peerMapRef.current.clear();
-    remoteMapRef.current.clear();
+    remoteStreamsRef.current = {};
     pendingCandidatesRef.current.clear();
+    stopInviteRing();
+    stopRoomAnnounce();
 
-    if (ringStopperRef.current) {
-      ringStopperRef.current();
-      ringStopperRef.current = null;
-    }
-    if (announceStopperRef.current) {
-      announceStopperRef.current();
-      announceStopperRef.current = null;
-    }
     if (channelRef.current) {
       try {
         supabase.removeChannel(channelRef.current);
@@ -174,40 +122,33 @@ export function useCall(userId: string | null): UseCallReturn {
     }
 
     setLocalStream(null);
-    setRemoteParticipants([]);
-    setScreenSharing(false);
-    setMicMuted(false);
-    setCamOff(false);
+    setRemoteStreams({});
+    setSharingScreen(false);
+    setPeerSharingScreen(false);
+    setMicOn(true);
+    setCamOn(true);
     setIncoming(null);
     setIncomingVideo(false);
     setCallerRingtone(undefined);
     setPeerRingtone(undefined);
-    lastCallRowRef.current = null;
-    peerIdRef.current = null;
     enteringRef.current = false;
     stopRingtone();
   }, []);
 
-  const acquireMedia = useCallback(
-    async (video: boolean): Promise<MediaStream> => {
-      unlockSound();
-      const res = await requestMediaPermissions({ audio: true, video });
-      if (!res.stream) {
-        throw new Error(res.error || "Media access failed");
-      }
-      localStreamRef.current = res.stream;
-      setLocalStream(res.stream);
-      return res.stream;
-    },
-    []
-  );
+  const acquireMedia = useCallback(async (video: boolean): Promise<MediaStream> => {
+    unlockSound();
+    const res = await requestMediaPermissions({ audio: true, video });
+    if (!res.stream) throw new Error(res.error || "Media access failed");
+    localStreamRef.current = res.stream;
+    setLocalStream(res.stream);
+    setMicOn(true);
+    setCamOn(video);
+    return res.stream;
+  }, []);
 
   const makeOffer = useCallback(async (targetPeerId: string, pc: RTCPeerConnection) => {
     try {
-      const offer = await pc.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: true,
-      });
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
       await pc.setLocalDescription(offer);
       channelRef.current?.send({
         type: "broadcast",
@@ -221,23 +162,17 @@ export function useCall(userId: string | null): UseCallReturn {
 
   const createPeer = useCallback(
     (targetPeerId: string, isInitiator: boolean) => {
-      if (peerMapRef.current.has(targetPeerId)) {
-        return peerMapRef.current.get(targetPeerId)!;
-      }
-
+      if (peerMapRef.current.has(targetPeerId)) return peerMapRef.current.get(targetPeerId)!;
       const pc = new RTCPeerConnection({
         iceServers: ICE_SERVERS,
         iceCandidatePoolSize: 1,
         bundlePolicy: "max-bundle",
       });
-
       peerMapRef.current.set(targetPeerId, pc);
 
       const stream = localStreamRef.current;
       if (stream) {
-        for (const track of stream.getTracks()) {
-          pc.addTrack(track, stream);
-        }
+        for (const track of stream.getTracks()) pc.addTrack(track, stream);
       }
 
       pc.onicecandidate = (e) => {
@@ -257,42 +192,33 @@ export function useCall(userId: string | null): UseCallReturn {
       pc.ontrack = (e) => {
         const [incomingStream] = e.streams;
         const currentStream = incomingStream || new MediaStream([e.track]);
-
-        remoteMapRef.current.set(targetPeerId, {
-          userId: targetPeerId,
-          stream: currentStream,
-          micOn: true,
-          camOn: currentStream.getVideoTracks().length > 0,
-          screenOn: false,
-        });
-        setRemoteParticipants(Array.from(remoteMapRef.current.values()));
+        remoteStreamsRef.current = {
+          ...remoteStreamsRef.current,
+          [targetPeerId]: currentStream,
+        };
+        setRemoteStreams({ ...remoteStreamsRef.current });
 
         if (statusRef.current !== "connected") {
           statusRef.current = "connected";
           setStatus("connected");
-          playCallConnectSound();
           stopRingtone();
         }
       };
 
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "connected") {
-          if (statusRef.current !== "connected") {
-            statusRef.current = "connected";
-            setStatus("connected");
-            playCallConnectSound();
-            stopRingtone();
-          }
+        if (pc.connectionState === "connected" && statusRef.current !== "connected") {
+          statusRef.current = "connected";
+          setStatus("connected");
+          stopRingtone();
         } else if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
-          remoteMapRef.current.delete(targetPeerId);
-          setRemoteParticipants(Array.from(remoteMapRef.current.values()));
+          const next = { ...remoteStreamsRef.current };
+          delete next[targetPeerId];
+          remoteStreamsRef.current = next;
+          setRemoteStreams(next);
         }
       };
 
-      if (isInitiator) {
-        void makeOffer(targetPeerId, pc);
-      }
-
+      if (isInitiator) void makeOffer(targetPeerId, pc);
       return pc;
     },
     [makeOffer]
@@ -303,12 +229,8 @@ export function useCall(userId: string | null): UseCallReturn {
       if (!payload || payload.to !== userIdRef.current) return;
       const from = payload.from;
       if (!from) return;
-
       let pc = peerMapRef.current.get(from);
-      if (!pc) {
-        pc = createPeer(from, false);
-      }
-
+      if (!pc) pc = createPeer(from, false);
       try {
         if (payload.type === "offer") {
           await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: payload.sdp }));
@@ -319,7 +241,6 @@ export function useCall(userId: string | null): UseCallReturn {
             } catch {}
           }
           pendingCandidatesRef.current.delete(from);
-
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
           channelRef.current?.send({
@@ -350,7 +271,7 @@ export function useCall(userId: string | null): UseCallReturn {
           }
         }
       } catch (err) {
-        console.warn("Signaling dispatch error:", err);
+        console.warn("Signaling error:", err);
       }
     },
     [createPeer]
@@ -363,7 +284,6 @@ export function useCall(userId: string | null): UseCallReturn {
       try {
         stopRingtone();
         await acquireMedia(video);
-
         setCallId(targetCallId);
         setWithVideo(video);
         setStatus("calling");
@@ -383,15 +303,11 @@ export function useCall(userId: string | null): UseCallReturn {
           void handleSig(payload);
         })
           .on("broadcast", { event: "joined" }, ({ payload }) => {
-            if (payload?.userId && payload.userId !== userId) {
-              createPeer(payload.userId, true);
-            }
+            if (payload?.userId && payload.userId !== userId) createPeer(payload.userId, true);
           })
           .on("broadcast", { event: "screen" }, ({ payload }) => {
-            if (payload?.userId && remoteMapRef.current.has(payload.userId)) {
-              const prev = remoteMapRef.current.get(payload.userId)!;
-              remoteMapRef.current.set(payload.userId, { ...prev, screenOn: !!payload.screenOn });
-              setRemoteParticipants(Array.from(remoteMapRef.current.values()));
+            if (payload?.userId && payload.userId !== userId) {
+              setPeerSharingScreen(!!payload.screenOn);
             }
           })
           .on("broadcast", { event: "leave" }, ({ payload }) => {
@@ -403,23 +319,20 @@ export function useCall(userId: string | null): UseCallReturn {
                 } catch {}
                 peerMapRef.current.delete(payload.userId);
               }
-              remoteMapRef.current.delete(payload.userId);
-              setRemoteParticipants(Array.from(remoteMapRef.current.values()));
+              const next = { ...remoteStreamsRef.current };
+              delete next[payload.userId];
+              remoteStreamsRef.current = next;
+              setRemoteStreams(next);
             }
           })
           .subscribe(async (s) => {
             if (s === "SUBSCRIBED") {
-              ch.send({
-                type: "broadcast",
-                event: "joined",
-                payload: { userId },
-              });
+              ch.send({ type: "broadcast", event: "joined", payload: { userId } });
             }
           });
 
         channelRef.current = ch;
         void setCallActive(targetCallId);
-        announceStopperRef.current = startRoomAnnounce(targetCallId);
       } finally {
         enteringRef.current = false;
       }
@@ -430,12 +343,8 @@ export function useCall(userId: string | null): UseCallReturn {
   const startDmCall = useCallback(
     async (peerId: string, video: boolean) => {
       if (!userId || !peerId || peerId === userId) return;
-      if (statusRef.current !== "idle") {
-        throw new Error("You are already in a call. Hang up first.");
-      }
+      if (statusRef.current !== "idle") throw new Error("You are already in a call. Hang up first.");
       isCallerRef.current = true;
-      peerIdRef.current = peerId;
-
       const call = await createCall({
         createdBy: userId,
         kind: "dm",
@@ -444,32 +353,23 @@ export function useCall(userId: string | null): UseCallReturn {
         withVideo: video,
       });
       if (!call) throw new Error("Could not create call room.");
-
-      ringStopperRef.current = startInviteRing(call.id, [peerId], video, getSavedRingtone() || undefined);
       void pushNotify(
         peerId,
         "Zyraxon",
-        `Incoming ${video ? "video" : "audio"} call — answer now`,
+        `Incoming ${video ? "video" : "audio"} call`,
         `call-${call.id}`,
-        [500, 200, 500, 200, 700]
+        [500, 200, 500]
       );
-
-      lastCallRowRef.current = call;
       await enterCall(call.id, video);
     },
     [enterCall, userId]
   );
 
-  // কোনো ফ্রেন্ড অ্যাড করা না থাকলেও সরাসরি ওপেন গ্রুপ কল শুরু হবে
   const startGroupCall = useCallback(
     async (inviteeIds: string[], video: boolean) => {
       if (!userId) return;
-      if (statusRef.current !== "idle") {
-        throw new Error("You are already in a call. Hang up first.");
-      }
+      if (statusRef.current !== "idle") throw new Error("You are already in a call. Hang up first.");
       isCallerRef.current = true;
-      peerIdRef.current = null;
-
       const call = await createCall({
         createdBy: userId,
         kind: "group",
@@ -478,15 +378,6 @@ export function useCall(userId: string | null): UseCallReturn {
         withVideo: video,
       });
       if (!call) throw new Error("Could not create group call room.");
-
-      if (inviteeIds.length > 0) {
-        ringStopperRef.current = startInviteRing(call.id, inviteeIds, video, getSavedRingtone() || undefined);
-        for (const id of inviteeIds) {
-          void pushNotify(id, "Zyraxon AI Space", "Incoming group call", `call-${call.id}`, [500, 200, 500]);
-        }
-      }
-
-      lastCallRowRef.current = call;
       await enterCall(call.id, video);
     },
     [enterCall, userId]
@@ -495,22 +386,21 @@ export function useCall(userId: string | null): UseCallReturn {
   const joinCall = useCallback(
     async (cId: string) => {
       isCallerRef.current = false;
-      const row = await fetchCallRow(cId);
-      await enterCall(cId, row?.with_video ?? false);
+      await enterCall(cId, false);
     },
     [enterCall]
   );
 
-  const acceptCall = useCallback(async () => {
+  const accept = useCallback(async () => {
     if (!incomingRef.current) return;
     const { callId: cId, withVideo: v, callerId } = incomingRef.current;
     isCallerRef.current = false;
     stopRingtone();
-    announceRingBack(cId, callerId);
+    broadcastRingBack(cId, callerId, getSavedRingtone());
     await enterCall(cId, v);
   }, [enterCall]);
 
-  const declineCall = useCallback(() => {
+  const decline = useCallback(() => {
     if (incomingRef.current && userId) {
       broadcastInviteDeclined(incomingRef.current.callId, userId, incomingRef.current.callerId);
     }
@@ -522,7 +412,6 @@ export function useCall(userId: string | null): UseCallReturn {
 
   const hangup = useCallback(() => {
     const curCallId = callIdRef.current;
-    playCallEndSound();
     if (channelRef.current) {
       try {
         channelRef.current.send({
@@ -532,12 +421,8 @@ export function useCall(userId: string | null): UseCallReturn {
         });
       } catch {}
     }
-    if (curCallId && userIdRef.current) {
-      if (isCallerRef.current) {
-        void endCallRow(curCallId);
-      } else {
-        void leaveCallRow(curCallId, userIdRef.current);
-      }
+    if (curCallId) {
+      void endCallRoom(curCallId);
     }
     localCleanup();
     setStatus("idle");
@@ -550,7 +435,7 @@ export function useCall(userId: string | null): UseCallReturn {
     const audioTrack = localStreamRef.current.getAudioTracks()[0];
     if (audioTrack) {
       audioTrack.enabled = !audioTrack.enabled;
-      setMicMuted(!audioTrack.enabled);
+      setMicOn(audioTrack.enabled);
     }
   }, []);
 
@@ -559,32 +444,23 @@ export function useCall(userId: string | null): UseCallReturn {
     const videoTrack = localStreamRef.current.getVideoTracks()[0];
     if (videoTrack) {
       videoTrack.enabled = !videoTrack.enabled;
-      setCamOff(!videoTrack.enabled);
+      setCamOn(videoTrack.enabled);
     }
   }, []);
 
-  // নিখুঁত স্ক্রিন শেয়ার — কোনো কালো পর্দা ছাড়াই অন্য প্রান্তে তাৎক্ষণিক লাইভ হবে
   const shareScreen = useCallback(async () => {
     if (!navigator.mediaDevices?.getDisplayMedia) {
       throw new Error("Your browser does not support screen sharing.");
     }
-
     try {
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          cursor: "always",
-          frameRate: { ideal: 30, max: 60 },
-          width: { ideal: 1920, max: 1920 },
-          height: { ideal: 1080, max: 1080 },
-        } as any,
+        video: { cursor: "always", frameRate: { ideal: 30, max: 60 } } as any,
         audio: false,
       });
-
       const screenTrack = displayStream.getVideoTracks()[0];
       if (!screenTrack) return;
       screenTrackRef.current = screenTrack;
 
-      // অন্য প্রান্তে সব কানেকশনে ভিডিও ট্র্যাক প্রতিস্থাপন
       for (const [, pc] of peerMapRef.current) {
         const senders = pc.getSenders();
         const videoSender = senders.find((s) => s.track && s.track.kind === "video");
@@ -596,30 +472,27 @@ export function useCall(userId: string | null): UseCallReturn {
           await pc.setLocalDescription(offer);
         }
       }
-
-      setScreenSharing(true);
+      setSharingScreen(true);
       channelRef.current?.send({
         type: "broadcast",
         event: "screen",
         payload: { userId: userIdRef.current, screenOn: true },
       });
-
       screenTrack.onended = () => {
-        stopScreenShare();
+        void stopScreenShare();
       };
     } catch (err) {
-      console.warn("Screen share cancelled or failed:", err);
+      console.warn("Screen share cancelled:", err);
     }
   }, []);
 
-  const stopScreenShare = useCallback(() => {
+  const stopScreenShare = useCallback(async () => {
     if (screenTrackRef.current) {
       try {
         screenTrackRef.current.stop();
       } catch {}
       screenTrackRef.current = null;
     }
-
     const originalVideoTrack = localStreamRef.current?.getVideoTracks()[0] || null;
     for (const [, pc] of peerMapRef.current) {
       const senders = pc.getSenders();
@@ -628,8 +501,7 @@ export function useCall(userId: string | null): UseCallReturn {
         void videoSender.replaceTrack(originalVideoTrack);
       }
     }
-
-    setScreenSharing(false);
+    setSharingScreen(false);
     channelRef.current?.send({
       type: "broadcast",
       event: "screen",
@@ -637,85 +509,78 @@ export function useCall(userId: string | null): UseCallReturn {
     });
   }, []);
 
-  // ইনভাইট এবং কল রুম লিসেনার
   useEffect(() => {
     if (!userId) return;
-    const unsubInvites = subscribeToInvites(userId, {
-      onInvite: (inv) => {
-        if (statusRef.current !== "idle") return;
-        setIncoming({
-          callId: inv.callId,
-          callerId: inv.callerId,
-          withVideo: inv.withVideo,
-          ringtone: inv.ringtone,
-        });
-        setIncomingVideo(inv.withVideo);
-        setCallerRingtone(inv.ringtone);
-        statusRef.current = "incoming";
-        setStatus("incoming");
-        startRingtone(inv.ringtone);
-      },
-      onCancel: (c) => {
-        if (incomingRef.current?.callId === c.callId) {
-          stopRingtone();
-          setIncoming(null);
-          setStatus("idle");
-          statusRef.current = "idle";
-        }
-      },
-      onRingBack: (p) => {
-        if (p.to === userIdRef.current && p.ringtone) {
-          setPeerRingtone(p.ringtone);
-          startRingtone(p.ringtone);
-        }
-      },
-      onDeclined: () => {},
+    const unsubInvites = subscribeCallInvites((inv) => {
+      if (statusRef.current !== "idle") return;
+      setIncoming({
+        callId: inv.callId,
+        callerId: inv.callerId,
+        withVideo: inv.withVideo,
+        ringtone: inv.ringtone,
+      });
+      setIncomingVideo(inv.withVideo);
+      setCallerRingtone(inv.ringtone);
+      statusRef.current = "incoming";
+      setStatus("incoming");
+      startRingtone(inv.ringtone);
     });
 
-    const unsubRooms = subscribeToRooms({
-      onRoomOpen: (row) => {
-        if (row.id !== callIdRef.current && row.created_by !== userId) {
-          setJoinableCalls((prev) => (prev.some((c) => c.id === row.id) ? prev : [...prev, row]));
-        }
-      },
-      onRoomClose: (cId) => {
-        setJoinableCalls((prev) => prev.filter((r) => r.id !== cId));
-      },
+    const unsubCancels = subscribeInviteCancels((c) => {
+      if (incomingRef.current?.callId === c.callId) {
+        stopRingtone();
+        setIncoming(null);
+        setStatus("idle");
+        statusRef.current = "idle";
+      }
     });
 
-    void fetchMyOpenCalls(userId).then(setJoinableCalls);
+    const unsubRooms = subscribeRoomOpens((row) => {
+      if (row.id !== callIdRef.current && row.created_by !== userId) {
+        setJoinableCalls((prev) => (prev.some((c) => c.id === row.id) ? prev : [...prev, row]));
+      }
+    });
+
+    const unsubCloses = subscribeRoomCloses(({ callId: cId }) => {
+      if (cId) setJoinableCalls((prev) => prev.filter((r) => r.id !== cId));
+    });
+
+    void fetchMyOpenCalls(userId).then((res) => {
+      if (res) setJoinableCalls(res.map((r) => r.call));
+    });
 
     return () => {
       unsubInvites();
+      unsubCancels();
       unsubRooms();
+      unsubCloses();
     };
   }, [userId]);
-
-  const remoteAudioStreams = useMemo(() => {
-    return remoteParticipants.map((p) => ({ peerId: p.userId, stream: p.stream }));
-  }, [remoteParticipants]);
 
   return {
     status,
     isCaller: isCallerRef.current,
+    outgoing: status === "calling" && isCallerRef.current,
     withVideo,
     localStream,
-    remoteParticipants,
-    screenSharing,
-    micMuted,
-    camOff,
+    remoteStreams,
     callId,
     incoming,
-    joinableCalls,
+    incomingVideo,
     callerRingtone,
     peerRingtone,
-    outgoing: status === "calling" && isCallerRef.current,
-    remoteAudioStreams,
+    joinableCalls,
+    micOn,
+    camOn,
+    sharingScreen,
+    peerSharingScreen,
     startDmCall,
     startGroupCall,
     joinCall,
-    acceptCall,
-    declineCall,
+    accept,
+    decline,
+    acceptCall: accept,
+    declineCall: decline,
     hangup,
     toggleMic,
     toggleCam,
