@@ -12,12 +12,13 @@ import { notify, playMessageSound } from "@/lib/sounds";
 import type { Message, Profile } from "@/lib/social";
 import { Phone, PhoneIncoming, PhoneMissed, PhoneOff } from "lucide-react";
 
-function localKey(peerId: string | null) {
-  return `zyraxon-messages-${peerId ?? "group"}`;
+function localKey(peerId: string | null, groupKey?: string) {
+  return `zyraxon-messages-${groupKey ?? peerId ?? "group"}`;
 }
 
 // Same channel for both sides of a DM (sorted ids) so broadcast always crosses
-function threadChannelName(me: string, peerId: string | null) {
+function threadChannelName(me: string, peerId: string | null, groupKey?: string) {
+  if (groupKey) return `zyraxon-thread-group-${groupKey}`;
   if (!peerId) return "zyraxon-thread-group";
   return `zyraxon-thread-${[me, peerId].sort().join("-")}`;
 }
@@ -29,6 +30,7 @@ export function Conversation({
   onOpenProfile,
   active = true,
   onUnread,
+  groupKey,
 }: {
   me: string;
   peerId: string | null;
@@ -36,6 +38,7 @@ export function Conversation({
   onOpenProfile: (id: string) => void;
   active?: boolean;
   onUnread?: (threadKey: string, delta: number) => void;
+  groupKey?: string;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [sending, setSending] = useState(false);
@@ -53,7 +56,7 @@ export function Conversation({
   const onUnreadRef = useRef(onUnread);
   onUnreadRef.current = onUnread;
   const threadKeyRef = useRef(peerId ?? "group");
-  threadKeyRef.current = peerId ?? "group";
+  threadKeyRef.current = groupKey ?? peerId ?? "group";
 
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -74,11 +77,13 @@ export function Conversation({
     (m: Message) =>
       m.kind === "push_sub"
         ? false
+        : groupKey
+        ? m.recipient_id === groupKey
         : peerId
         ? (m.sender_id === me && m.recipient_id === peerId) ||
           (m.sender_id === peerId && m.recipient_id === me)
         : m.recipient_id === null,
-    [me, peerId]
+    [me, peerId, groupKey]
   );
 
   const belongsHereRef = useRef(belongsHere);
@@ -86,12 +91,12 @@ export function Conversation({
 
   useEffect(() => {
     try {
-      const cached = localStorage.getItem(localKey(peerId));
+      const cached = localStorage.getItem(localKey(peerId, groupKey));
       setMessages(cached ? (JSON.parse(cached) as Message[]) : []);
     } catch {
       setMessages([]);
     }
-  }, [peerId]);
+  }, [peerId, groupKey]);
 
   useEffect(() => {
     let alive = true;
@@ -101,7 +106,9 @@ export function Conversation({
         .select("*")
         .order("created_at", { ascending: true })
         .limit(300);
-      query = peerId
+      query = groupKey
+        ? query.eq("recipient_id", groupKey)
+        : peerId
         ? query.or(
             `and(sender_id.eq.${me},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${me})`
           )
@@ -114,13 +121,13 @@ export function Conversation({
     return () => {
       alive = false;
     };
-  }, [me, peerId]);
+  }, [me, peerId, groupKey]);
 
   useEffect(() => {
     try {
-      localStorage.setItem(localKey(peerId), JSON.stringify(messages.slice(-200)));
+      localStorage.setItem(localKey(peerId, groupKey), JSON.stringify(messages.slice(-200)));
     } catch {}
-  }, [messages, peerId]);
+  }, [messages, peerId, groupKey]);
 
   const handleIncoming = useCallback((msg: Message) => {
     if (!belongsHereRef.current(msg)) return;
@@ -145,7 +152,7 @@ export function Conversation({
 
   // Realtime channel (Messages + Typing + Seen + Guest + mirror broadcast)
   useEffect(() => {
-    const channel = supabase.channel(threadChannelName(me, peerId));
+    const channel = supabase.channel(threadChannelName(me, peerId, groupKey));
 
     channel
       .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, (payload) => {
@@ -192,7 +199,7 @@ export function Conversation({
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
       supabase.removeChannel(channel);
     };
-  }, [handleIncoming, me, peerId]);
+  }, [handleIncoming, me, peerId, groupKey]);
 
   // Tell the peers which message I have read — only while this thread is active,
   // so the "seen" badge stays honest. Works for both DMs (peerId) and the group.
@@ -238,7 +245,7 @@ export function Conversation({
         const baseMsg: Partial<Message> = {
           id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           sender_id: me,
-          recipient_id: peerId,
+          recipient_id: groupKey ?? peerId,
           created_at: new Date().toISOString(),
         };
 
@@ -302,7 +309,7 @@ export function Conversation({
         setSending(false);
       }
     },
-    [me, peerId, profileMap]
+    [me, peerId, profileMap, groupKey]
   );
 
   async function removeMessage(id: string) {

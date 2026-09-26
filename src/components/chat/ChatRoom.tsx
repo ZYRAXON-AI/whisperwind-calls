@@ -14,6 +14,7 @@ import {
   Users,
   Video as VideoIcon,
   X,
+  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -26,6 +27,7 @@ import { ProfileDialog } from "./ProfileDialog";
 import { ProfilePage } from "./ProfilePage";
 import { RingtoneDialog } from "./RingtoneDialog";
 import { YouTubePanel } from "./YouTubePanel";
+import { ZyraxonPanel } from "./ZyraxonPanel";
 import { supabase } from "@/integrations/supabase/client";
 import { signedUrl } from "@/lib/media";
 import {
@@ -34,6 +36,7 @@ import {
   type Profile,
   type View,
   friendIdsOf,
+  ZYRAXON_ROOM,
 } from "@/lib/social";
 import {
   ensureNotificationPermission,
@@ -54,7 +57,7 @@ export function ChatRoom({
   user: { id: string; email?: string | null };
   onSignOut: () => void;
 }) {
-  const [view, setView] = useState<View>({ type: "group" });
+  const [view, setView] = useState<View>({ type: "zyraxon" });
   // The chat thread that is currently mounted. It only changes when the user
   // actually opens the group lounge or a DM — switching to YouTube / Friends /
   // Profile keeps it intact so Conversation never reloads its history.
@@ -194,12 +197,14 @@ export function ChatRoom({
         const m = payload.new as Message | undefined;
         if (!m || m.kind === "push_sub" || m.sender_id === user.id) return;
         const isGroup = m.recipient_id === null;
+        const isZyraxonRoom = m.recipient_id === ZYRAXON_ROOM;
         const isDmToMe = m.recipient_id === user.id;
-        if (!isGroup && !isDmToMe) return;
-        const key = isGroup ? "group" : m.sender_id;
+        if (!isGroup && !isZyraxonRoom && !isDmToMe) return;
+        const key = isGroup ? "group" : isZyraxonRoom ? ZYRAXON_ROOM : m.sender_id;
         const onScreen =
           (isGroup && viewRef.current.type === "group") ||
-          (!isGroup && viewRef.current.type === "dm" && viewRef.current.peerId === m.sender_id);
+          (isZyraxonRoom && viewRef.current.type === "zyraxon") ||
+          (!isGroup && !isZyraxonRoom && viewRef.current.type === "dm" && viewRef.current.peerId === m.sender_id);
         if (onScreen) return;
         setUnread((prev) => ({ ...prev, [key]: (prev[key] ?? 0) + 1 }));
       })
@@ -377,6 +382,8 @@ export function ChatRoom({
   const headerTitle =
     view.type === "dm"
       ? peer?.display_name ?? "Direct Message"
+      : view.type === "zyraxon"
+      ? "ZYRAXON-AI Group"
       : view.type === "friends"
       ? "People & Friends"
       : view.type === "requests"
@@ -435,6 +442,14 @@ export function ChatRoom({
             {(unread["group"] ?? 0) > 0 && (
               <span className="ml-auto grid h-5 min-w-5 place-items-center rounded-full bg-primary px-1.5 text-[11px] font-semibold text-primary-foreground">
                 {badgeLabel(unread["group"])}
+              </span>
+            )}
+          </button>
+          <button type="button" className={navItem(view.type === "zyraxon")} onClick={() => go({ type: "zyraxon" })}>
+            <Zap className="h-4 w-4" /> ZYRAXON-AI Group
+            {(unread[ZYRAXON_ROOM] ?? 0) > 0 && (
+              <span className="ml-auto grid h-5 min-w-5 place-items-center rounded-full bg-primary px-1.5 text-[11px] font-semibold text-primary-foreground">
+                {badgeLabel(unread[ZYRAXON_ROOM])}
               </span>
             )}
           </button>
@@ -645,6 +660,16 @@ export function ChatRoom({
               onlineUserIds={onlineUserIds}
               onAddFriend={addFriend}
               onOpenDm={(peerId) => go({ type: "dm", peerId })}
+              onOpenProfile={(userId) => go({ type: "profile", userId })}
+            />
+          </div>
+
+          <div className={view.type === "zyraxon" ? "h-full" : "pointer-events-none hidden"}>
+            <ZyraxonPanel
+              me={user.id}
+              profiles={profiles}
+              active={view.type === "zyraxon"}
+              onUnread={handleUnread}
               onOpenProfile={(userId) => go({ type: "profile", userId })}
             />
           </div>

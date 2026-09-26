@@ -27,11 +27,14 @@ export type Message = {
 
 export type View =
   | { type: "group" }
+  | { type: "zyraxon" }
   | { type: "dm"; peerId: string }
   | { type: "friends" }
   | { type: "requests" }
   | { type: "youtube" }
   | { type: "profile"; userId: string };
+
+export const ZYRAXON_ROOM = "zyraxon-ai";
 
 export function friendIdsOf(list: Friendship[], me: string) {
   return list
