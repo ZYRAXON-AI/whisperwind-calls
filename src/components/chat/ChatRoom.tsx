@@ -241,7 +241,8 @@ export function ChatRoom({
     } else if (call.status === "calling" && call.outgoing) {
       // We placed the call — play a neutral ringback in our ear (not our own melody)
       unlockSound();
-      startRingback();
+      if (call.peerRingtone) startRingtone(call.peerRingtone);
+      else startRingback();
     } else {
       stopRingtone();
       try {
@@ -254,7 +255,7 @@ export function ChatRoom({
         navigator.vibrate?.(0);
       } catch {}
     };
-  }, [call.status, call.callerRingtone, call.incoming, call.outgoing]);
+  }, [call.status, call.callerRingtone, call.peerRingtone, call.incoming, call.outgoing]);
 
   // Background tab → user returns while the call is still ringing (incoming OR
   // outgoing-caller): restart the ringtone, because some browsers pause audio in
@@ -265,6 +266,7 @@ export function ChatRoom({
     const restart = () => {
       unlockSound();
       if (call.status === "incoming") startRingtone(call.callerRingtone);
+      else if (call.peerRingtone) startRingtone(call.peerRingtone);
       else startRingback();
     };
     const onVisible = () => {
@@ -286,7 +288,7 @@ export function ChatRoom({
       document.removeEventListener("pointerdown", restart);
       document.removeEventListener("keydown", restart);
     };
-  }, [call.status, call.callerRingtone, call.outgoing]);
+  }, [call.status, call.callerRingtone, call.peerRingtone, call.outgoing]);
 
   const friendIds = useMemo(() => friendIdsOf(friendships, user.id), [friendships, user.id]);
   const friends = friendIds.map((id) => profiles[id]).filter(Boolean) as Profile[];

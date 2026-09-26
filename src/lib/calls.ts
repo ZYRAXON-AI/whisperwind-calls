@@ -455,6 +455,9 @@ export async function createCall(opts: {
       startInviteRing(buildInvites(fallback, invitees));
       return fallback;
     }
+    if (error?.code === "23505" || error?.message?.includes("calls_one_active")) {
+      throw new Error("A call is already active here — tap Join to enter.");
+    }
     return null;
   }
 
@@ -531,6 +534,38 @@ export async function countJoinedMembers(callId: string): Promise<number> {
 export async function setCallActive(callId: string): Promise<void> {
   const client = raw();
   await client.from("calls").update({ status: "active" }).eq("id", callId).eq("status", "ringing");
+}
+
+// True when a call room is already ringing/active for this peer pair (DM) or any
+// group room. We check before creating so a second call can't start — only Join.
+export async function hasActiveCall(opts: {
+  kind: "group" | "dm";
+  peerId?: string | null;
+  userId: string;
+}): Promise<boolean> {
+  const client = raw();
+  if (opts.kind === "group") {
+    const { data } = await client
+      .from("calls")
+      .select("id")
+      .eq("kind", "group")
+      .neq("status", "ended")
+      .limit(1);
+    return (data ?? []).length > 0;
+  }
+  if (opts.kind === "dm" && opts.peerId) {
+    const a = opts.userId;
+    const b = opts.peerId;
+    const { data } = await client
+      .from("calls")
+      .select("id")
+      .eq("kind", "dm")
+      .neq("status", "ended")
+      .or(`and(created_by.eq.${a},peer_id.eq.${b}),and(created_by.eq.${b},peer_id.eq.${a})`)
+      .limit(1);
+    return (data ?? []).length > 0;
+  }
+  return false;
 }
 
 export async function endCallRoom(callId: string): Promise<void> {

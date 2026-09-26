@@ -5,6 +5,7 @@ import {
   createCall,
   endCallRoom,
   fetchMyOpenCalls,
+  hasActiveCall,
   pokeInviteRing,
   setCallActive,
   startInviteRing,
@@ -15,6 +16,7 @@ import {
   subscribeInviteCancels,
   subscribeRoomOpens,
   subscribeRoomCloses,
+  subscribeRingBacks,
   broadcastRingBack,
   broadcastInviteDeclined,
   broadcastInviteCancel,
@@ -74,6 +76,17 @@ export function useCall(userId: string | null) {
   const incomingRef = useRef(incoming);
   const userIdRef = useRef(userId);
   const enteringRef = useRef(false);
+  const dismissedRef = useRef(new Map<string, number>());
+
+  const dismissCall = useCallback((callId: string) => {
+    dismissedRef.current.set(callId, Date.now() + 20_000);
+    if (dismissedRef.current.size > 50) {
+      const now = Date.now();
+      for (const [id, expires] of dismissedRef.current) {
+        if (expires < now) dismissedRef.current.delete(id);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     userIdRef.current = userId;
@@ -135,6 +148,7 @@ export function useCall(userId: string | null) {
     setIncomingVideo(false);
     setCallerRingtone(undefined);
     setPeerRingtone(undefined);
+    isCallerRef.current = false;
     enteringRef.current = false;
     stopRingtone();
   }, []);
@@ -364,6 +378,8 @@ export function useCall(userId: string | null) {
       if (!userId || !peerId || peerId === userId) return;
       if (statusRef.current !== "idle") throw new Error("You are already in a call. Hang up first.");
       isCallerRef.current = true;
+      const busy = await hasActiveCall({ kind: "dm", peerId, userId });
+      if (busy) throw new Error("A call is already active here — tap Join to enter.");
       const call = await createCall({
         createdBy: userId,
         kind: "dm",
@@ -390,6 +406,8 @@ export function useCall(userId: string | null) {
       if (!userId) return;
       if (statusRef.current !== "idle") throw new Error("You are already in a call. Hang up first.");
       isCallerRef.current = true;
+      const busy = await hasActiveCall({ kind: "group", userId });
+      if (busy) throw new Error("A group call is already active — tap Join to enter.");
       const call = await createCall({
         createdBy: userId,
         kind: "group",
@@ -426,12 +444,13 @@ export function useCall(userId: string | null) {
   const decline = useCallback(async () => {
     if (incomingRef.current && userId) {
       broadcastInviteDeclined(incomingRef.current.callId, userId, incomingRef.current.callerId);
+      dismissCall(incomingRef.current.callId);
     }
     stopRingtone();
     setIncoming(null);
     setStatus("idle");
     statusRef.current = "idle";
-  }, [userId]);
+  }, [userId, dismissCall]);
 
   const hangup = useCallback(async () => {
     const curCallId = callIdRef.current;
@@ -446,14 +465,19 @@ export function useCall(userId: string | null) {
       } catch {}
     }
     if (curCallId) {
+      stopInviteRing(curCallId);
+      dismissCall(curCallId);
       broadcastInviteCancel(curCallId, userIdRef.current ?? "");
       void endCallRoom(curCallId);
+      stopRoomAnnounce(curCallId);
     }
+    setJoinableCalls((prev) => prev.filter((c) => c.id !== curCallId));
     localCleanup();
     setStatus("idle");
     statusRef.current = "idle";
     setCallId(null);
-  }, [localCleanup]);
+    isCallerRef.current = false;
+  }, [localCleanup, dismissCall]);
 
   const toggleMic = useCallback(() => {
     if (!localStreamRef.current) return;
@@ -539,6 +563,8 @@ export function useCall(userId: string | null) {
     const unsubInvites = subscribeCallInvites((inv) => {
       if (inv.callerId === userId) return;
       if (statusRef.current !== "idle") return;
+      const expires = dismissedRef.current.get(inv.callId);
+      if (expires && expires > Date.now()) return;
       setIncoming({
         callId: inv.callId,
         callerId: inv.callerId,
@@ -561,6 +587,14 @@ export function useCall(userId: string | null) {
       }
     });
 
+    // Callee answered — play its chosen ringtone back to the waiting caller.
+    const unsubRingbacks = subscribeRingBacks((r) => {
+      if (r.to !== userId || r.callId !== callIdRef.current) return;
+      if (statusRef.current !== "calling" || !isCallerRef.current) return;
+      setPeerRingtone(r.ringtone);
+      startRingtone(r.ringtone);
+    });
+
     const unsubRooms = subscribeRoomOpens((row) => {
       if (row.id !== callIdRef.current && row.created_by !== userId) {
         setJoinableCalls((prev) => (prev.some((c) => c.id === row.id) ? prev : [...prev, row]));
@@ -578,6 +612,7 @@ export function useCall(userId: string | null) {
     return () => {
       unsubInvites();
       unsubCancels();
+      unsubRingbacks();
       unsubRooms();
       unsubCloses();
     };
