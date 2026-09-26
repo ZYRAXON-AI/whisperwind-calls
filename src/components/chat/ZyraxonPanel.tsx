@@ -24,9 +24,11 @@ import {
   Save,
   Search,
   Send,
+  Sparkles,
   Tag,
   Trash2,
   Unlock,
+  UploadCloud,
   X,
   Zap,
 } from "lucide-react";
@@ -202,6 +204,8 @@ export function ZyraxonPanel({
     setCurrentSha("");
     setCode("");
     setOriginalCode("");
+    setPrTitle("");
+    setCommitMsg("");
   };
 
   const addProject = () => {
@@ -287,11 +291,13 @@ export function ZyraxonPanel({
     setBusy(true);
     try {
       const fileData = await ghFile(token, repo.trim(), path, branch);
+      const fileName = path.split("/").pop() ?? path;
       setCurrent(path);
       setCurrentSha(fileData.sha);
       setCode(fileData.content);
       setOriginalCode(fileData.content);
-      setCommitMsg(`Update ${path.split("/").pop() ?? path}`);
+      setCommitMsg(`Update ${fileName}`);
+      setPrTitle(`Update ${fileName}`);
       setEditorKey((k) => k + 1);
       setShowFileExplorerMobile(false);
     } catch (err) {
@@ -307,17 +313,20 @@ export function ZyraxonPanel({
       return;
     }
     const cleanPath = newFilePath.trim().replace(/^\/+/, "");
+    const fileName = cleanPath.split("/").pop() ?? cleanPath;
     setCurrent(cleanPath);
     setCurrentSha("");
     setCode("// Write your code here\n");
     setOriginalCode("");
-    setCommitMsg(`Add ${cleanPath.split("/").pop() ?? cleanPath}`);
+    setCommitMsg(`Add ${fileName}`);
+    setPrTitle(`Add ${fileName}`);
     setEditorKey((k) => k + 1);
     setShowNewFileModal(false);
     setNewFilePath("");
-    toast.info(`Created draft for ${cleanPath}. Write and Commit to publish.`);
+    toast.info(`Created draft for ${cleanPath}. Push to publish.`);
   }
 
+  // Direct Push to current branch
   async function commit() {
     if (!current) {
       toast.error("Select or create a file first");
@@ -325,7 +334,8 @@ export function ZyraxonPanel({
     }
     setCommitting(true);
     try {
-      const message = commitMsg.trim() || `Update ${current.split("/").pop() ?? current}`;
+      const fileName = current.split("/").pop() ?? current;
+      const message = commitMsg.trim() || `Update ${fileName}`;
       const res = await ghWrite(token, repo.trim(), current, code, message, branch, currentSha || undefined);
 
       setCurrentSha(res.newSha);
@@ -339,35 +349,45 @@ export function ZyraxonPanel({
       const updatedTree = await ghTree(token, info.full, branch);
       setTree(updatedTree);
 
-      toast.success(`Committed to ${branch}: ${message}`);
+      toast.success(`Directly pushed to ${branch}: ${message}`);
       void loadPrsList(token, info.full);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Commit failed");
+      toast.error(err instanceof Error ? err.message : "Direct Push failed");
     } finally {
       setCommitting(false);
     }
   }
 
+  // Create Pull Request with auto-title and auto-branch
   async function createPullRequest() {
     if (!current) {
       toast.error("Open a file first");
       return;
     }
-    if (!prTitle.trim()) {
-      toast.error("Please enter a title for the Pull Request");
-      return;
-    }
+    const fileName = current.split("/").pop() ?? current;
+    const finalPrTitle = prTitle.trim() || commitMsg.trim() || `Update ${fileName}`;
+    const cleanFileName = fileName.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase();
+    const branchName = newBranch.trim() || `patch-${cleanFileName}-${Date.now().toString(36)}`;
+
     setCommitting(true);
     try {
       const info = await ghRepo(token, repo.trim());
-      const branchName = newBranch.trim() || `patch-${Date.now().toString(36)}`;
 
-      await ghBranchCreate(token, info.full, branchName, headShaRef.current);
-      await ghWrite(token, info.full, current, code, prTitle.trim(), branchName, currentSha || undefined);
-      const prNum = await ghPrCreate(token, info.full, prTitle.trim(), branchName, info.branch);
+      // Fetch fresh 40-character base SHA to ensure zero validation errors
+      let baseSha = headShaRef.current;
+      if (!baseSha || baseSha.length < 40) {
+        baseSha = await ghHeadSha(token, info.full, info.branch);
+      }
+      if (!baseSha || baseSha.length < 40) {
+        throw new Error("Could not fetch 40-character base commit SHA. Check branch name & permissions.");
+      }
+
+      await ghBranchCreate(token, info.full, branchName, baseSha);
+      await ghWrite(token, info.full, current, code, finalPrTitle, branchName, currentSha || undefined);
+      const prNum = await ghPrCreate(token, info.full, finalPrTitle, branchName, info.branch);
 
       toast.success(`Pull Request #${prNum} created successfully!`);
-      setPrTitle("");
+      setPrTitle(`Update ${fileName}`);
       setNewBranch("");
       setStudioView("prs");
       void loadPrsList(token, info.full);
@@ -461,9 +481,9 @@ export function ZyraxonPanel({
             {isOpen ? (
               <FolderOpen className="h-3.5 w-3.5 shrink-0 text-amber-400" />
             ) : (
-              <Folder className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+              <Folder className="h-3.5 w-3.5 shrink-0 text-amber-300" />
             )}
-            <span className="truncate font-medium">{node.name}</span>
+            <span className="truncate">{node.name}</span>
           </button>
           {isOpen && node.children && (
             <div className="flex flex-col">{node.children.map((child) => renderTreeNode(child, depth + 1))}</div>
@@ -478,57 +498,57 @@ export function ZyraxonPanel({
         key={node.path}
         type="button"
         onClick={() => void openFile(node.path)}
-        style={{ paddingLeft: `${depth * 12 + 20}px` }}
-        className={`flex w-full items-center gap-2 rounded-lg py-1 text-left text-xs transition ${
-          isSelected ? "bg-primary/25 font-semibold text-white" : "text-zinc-400 hover:bg-white/10 hover:text-zinc-200"
+        style={{ paddingLeft: `${depth * 12 + 18}px` }}
+        className={`flex w-full items-center gap-1.5 rounded-lg py-1 text-left text-xs transition ${
+          isSelected ? "gradient-romance font-semibold text-white shadow" : "text-zinc-400 hover:bg-white/10 hover:text-white"
         }`}
       >
-        <FileCode className="h-3.5 w-3.5 shrink-0 text-primary" />
+        <FileCode className="h-3 w-3 shrink-0" />
         <span className="truncate">{node.name}</span>
       </button>
     );
   };
 
-  const changed = current && code !== originalCode;
+  const changed = code !== originalCode;
 
   return (
     <div
-      className={`flex flex-col gap-2 p-2 sm:p-3 transition-all duration-200 ${
-        isFullScreen ? "fixed inset-0 z-50 bg-[#090714] p-3" : "h-full"
+      className={`flex flex-col ${
+        isFullScreen
+          ? "fixed inset-0 z-50 bg-[#07050d] p-3 backdrop-blur-md"
+          : "h-full w-full"
       }`}
     >
-      {/* Top Header Bar */}
-      <div className="glass-strong flex shrink-0 items-center justify-between gap-2 rounded-2xl px-3 py-2 shadow-lg">
+      {/* Top Navigation Bar */}
+      <header className="glass-strong mb-2 flex flex-wrap items-center justify-between gap-2 rounded-2xl px-3 py-2 shadow">
         <div className="flex items-center gap-2">
-          <div className="gradient-romance grid h-8 w-8 place-items-center rounded-xl text-primary-foreground shadow">
+          <div className="gradient-romance flex h-7 w-7 items-center justify-center rounded-xl text-primary-foreground shadow">
             <Zap className="h-4 w-4" />
           </div>
           <div>
-            <h2 className="text-sm font-bold leading-tight">ZYRAXON AI Multi-Studio</h2>
-            <p className="text-[11px] text-muted-foreground">
-              {unlocked ? "GitHub Multi-Repository Management" : "Password Protected Studio"}
-            </p>
+            <h2 className="text-xs font-bold tracking-tight text-foreground sm:text-sm">ZYRAXON AI Multi-Studio</h2>
+            <p className="text-[10px] text-muted-foreground">GitHub Multi-Repository Management</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5">
-          {tab === "code" && unlocked && (
+        <div className="flex items-center gap-2">
+          {tab === "code" && (
             <button
               type="button"
-              onClick={() => setIsFullScreen((prev) => !prev)}
-              title={isFullScreen ? "Exit Fullscreen" : "Maximize Screen"}
-              className="glass grid h-8 w-8 place-items-center rounded-xl text-zinc-300 transition hover:bg-white/15"
+              onClick={() => setIsFullScreen((v) => !v)}
+              className="glass rounded-xl p-1.5 text-zinc-300 hover:bg-white/15"
+              title={isFullScreen ? "Exit Fullscreen" : "Maximize Studio"}
             >
               {isFullScreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
             </button>
           )}
 
-          <div className="flex rounded-xl border border-white/10 bg-white/5 p-0.5">
+          <div className="flex rounded-xl bg-white/5 p-0.5">
             <button
               type="button"
               onClick={() => setTab("chat")}
-              className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${
-                tab === "chat" ? "bg-white/15 text-foreground shadow" : "text-muted-foreground hover:bg-white/10"
+              className={`rounded-lg px-3 py-1 text-xs font-medium transition ${
+                tab === "chat" ? "gradient-romance text-white shadow" : "text-muted-foreground hover:text-foreground"
               }`}
             >
               Group Chat
@@ -536,273 +556,279 @@ export function ZyraxonPanel({
             <button
               type="button"
               onClick={() => setTab("code")}
-              className={`flex items-center gap-1 rounded-lg px-3 py-1 text-xs font-semibold transition ${
-                tab === "code" ? "bg-white/15 text-foreground shadow" : "text-muted-foreground hover:bg-white/10"
+              className={`rounded-lg px-3 py-1 text-xs font-medium transition ${
+                tab === "code" ? "gradient-romance text-white shadow" : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              <KeyRound className="h-3.5 w-3.5" /> Code Studio
+              Code Studio
             </button>
           </div>
         </div>
-      </div>
+      </header>
 
-      {/* Group Chat Tab */}
+      {/* TAB 1: GROUP CHAT */}
       {tab === "chat" && (
-        <div className="min-h-0 flex-1 overflow-hidden rounded-2xl border border-white/10 bg-black/20">
+        <div className="glass-strong flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl shadow">
           <Conversation
             me={me}
             peerId={null}
             profiles={profiles}
+            onOpenProfile={onOpenProfile}
             active={active}
             onUnread={onUnread}
-            onOpenProfile={onOpenProfile}
             groupKey={ZYRAXON_ROOM}
           />
         </div>
       )}
 
-      {/* Secret Gate */}
+      {/* TAB 2: CODE STUDIO */}
       {tab === "code" && !unlocked && (
-        <div className="flex min-h-0 flex-1 items-center justify-center rounded-2xl">
-          <div className="glass-strong w-full max-w-sm rounded-3xl p-6 text-center shadow-2xl">
-            <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-white/10">
-              <Lock className="h-6 w-6 text-primary" />
+        <div className="glass-strong flex flex-1 items-center justify-center rounded-2xl p-6 text-center shadow">
+          <div className="w-full max-w-sm space-y-4">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/20 text-primary">
+              <Lock className="h-6 w-6" />
             </div>
-            <h3 className="text-lg font-bold">Secret Code Studio</h3>
-            <p className="mt-1 text-xs text-muted-foreground">Enter password to unlock GitHub development workspace.</p>
-            <input
-              value={secret}
-              onChange={(e) => setSecret(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && secret.trim().toLowerCase() === SECRET) unlock();
-              }}
-              type="password"
-              placeholder="Enter studio secret"
-              className="mt-4 w-full rounded-2xl border border-border bg-input px-4 py-2.5 text-sm outline-none"
-            />
-            <button
-              type="button"
-              onClick={() => (secret.trim().toLowerCase() === SECRET ? unlock() : toast.error("Wrong secret"))}
-              className="gradient-romance mt-3 w-full rounded-2xl px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow transition hover:opacity-90"
-            >
-              Unlock Code Studio
-            </button>
+            <div>
+              <h3 className="text-base font-bold text-foreground">ZYRAXON Code Studio Locked</h3>
+              <p className="text-xs text-muted-foreground">Enter your developer access code to open GitHub Studio.</p>
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && secret === SECRET) unlock();
+                }}
+                placeholder="Access key..."
+                className="flex-1 rounded-xl border border-border bg-input px-3 py-2 text-xs outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (secret === SECRET) unlock();
+                  else toast.error("Incorrect key");
+                }}
+                className="gradient-romance rounded-xl px-4 py-2 text-xs font-semibold text-primary-foreground shadow"
+              >
+                <Unlock className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Unlocked Multi-Project Workspace */}
       {tab === "code" && unlocked && (
         <div className="flex min-h-0 flex-1 flex-col gap-2">
-          {/* Multi-Project Tabs & Switcher */}
-          <div className="glass-strong flex flex-wrap items-center gap-1.5 rounded-2xl p-2 shadow">
-            <div className="scroll-soft flex max-w-full items-center gap-1 overflow-x-auto pb-0.5">
-              {managedProjects.map((p) => {
-                const isActive = p === repo;
-                return (
-                  <div
-                    key={p}
-                    onClick={() => switchProject(p)}
-                    className={`group flex cursor-pointer items-center gap-1.5 rounded-xl px-2.5 py-1 text-xs font-semibold transition ${
-                      isActive
-                        ? "bg-primary text-primary-foreground shadow"
-                        : "bg-white/5 text-zinc-300 hover:bg-white/10"
-                    }`}
-                  >
-                    <GitBranch className="h-3 w-3" />
-                    <span className="max-w-[140px] truncate">{p}</span>
-                    {managedProjects.length > 1 && (
-                      <button
-                        type="button"
-                        onClick={(e) => removeProject(p, e)}
-                        className="rounded p-0.5 opacity-60 hover:bg-black/20 hover:opacity-100"
-                        title="Close Project"
-                      >
-                        <X className="h-2.5 w-2.5" />
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
+          {/* Multi-Project Tabs Bar */}
+          <div className="glass-strong flex items-center gap-1.5 overflow-x-auto rounded-2xl p-1.5 shadow scroll-soft">
+            {managedProjects.map((proj) => {
+              const isActive = repo === proj;
+              return (
+                <div
+                  key={proj}
+                  onClick={() => switchProject(proj)}
+                  className={`group flex cursor-pointer items-center gap-1.5 rounded-xl px-2.5 py-1 text-xs font-semibold transition ${
+                    isActive
+                      ? "gradient-romance text-white shadow"
+                      : "bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white"
+                  }`}
+                >
+                  <GitBranch className="h-3 w-3 shrink-0" />
+                  <span className="max-w-[130px] truncate">{proj}</span>
+                  {managedProjects.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={(e) => removeProject(proj, e)}
+                      className="opacity-0 transition group-hover:opacity-100 hover:text-red-400"
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
 
-              <button
-                type="button"
-                onClick={() => setShowAddProject((prev) => !prev)}
-                className="flex items-center gap-1 rounded-xl border border-dashed border-white/20 bg-white/5 px-2.5 py-1 text-xs text-zinc-300 transition hover:bg-white/10"
-              >
-                <Plus className="h-3 w-3" /> Add Project
-              </button>
-            </div>
-
-            {/* Quick Add Project Dropdown/Input */}
-            {showAddProject && (
-              <div className="flex w-full items-center gap-2 pt-1 sm:w-auto">
+            {showAddProject ? (
+              <div className="flex items-center gap-1">
                 <input
                   value={newRepoInput}
                   onChange={(e) => setNewRepoInput(e.target.value)}
-                  placeholder="owner/repository"
-                  className="rounded-xl border border-border bg-input px-3 py-1 text-xs outline-none"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") addProject();
+                    if (e.key === "Escape") setShowAddProject(false);
+                  }}
+                  placeholder="owner/repo"
+                  className="w-28 rounded-lg border border-border bg-input px-2 py-0.5 text-xs text-white outline-none"
+                  autoFocus
                 />
                 <button
                   type="button"
                   onClick={addProject}
-                  className="gradient-romance rounded-xl px-3 py-1 text-xs font-semibold text-white"
+                  className="rounded-lg bg-primary/20 px-2 py-0.5 text-xs font-semibold text-primary"
                 >
                   Add
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAddProject(false)}
+                  className="text-xs text-zinc-400 hover:text-white"
+                >
+                  ✕
+                </button>
               </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowAddProject(true)}
+                className="flex items-center gap-1 rounded-xl bg-white/5 px-2.5 py-1 text-xs font-medium text-zinc-400 transition hover:bg-white/10 hover:text-white"
+              >
+                <Plus className="h-3 w-3" /> Add Project
+              </button>
             )}
 
-            {/* Token & Connection */}
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto flex items-center gap-1.5 pl-2">
               <input
+                type="password"
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
-                type="password"
-                placeholder="GitHub Token"
-                className="w-32 rounded-xl border border-border bg-input px-2.5 py-1 text-xs outline-none sm:w-48"
+                placeholder="GitHub PAT (ghp_...)"
+                className="w-32 rounded-xl border border-border bg-input px-2 py-1 text-[11px] outline-none sm:w-44"
               />
               <button
                 type="button"
                 onClick={() => void connect()}
                 disabled={busy}
-                className="gradient-romance flex items-center gap-1 rounded-xl px-3 py-1 text-xs font-semibold text-white shadow hover:opacity-90 disabled:opacity-40"
+                className="gradient-romance flex items-center gap-1 rounded-xl px-2.5 py-1 text-xs font-semibold text-primary-foreground shadow disabled:opacity-50"
               >
                 {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-                {connected ? "Sync" : "Connect"}
+                Sync
               </button>
             </div>
           </div>
 
-          {/* Sub Navigation (Editor | PRs Table | Releases) */}
-          <div className="flex items-center justify-between gap-2 px-1">
-            <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-black/30 p-1">
+          {/* Sub Navigation (Editor vs PRs vs Releases) */}
+          <div className="flex items-center justify-between px-1">
+            <div className="flex items-center gap-1">
               <button
                 type="button"
                 onClick={() => setStudioView("editor")}
-                className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${
-                  studioView === "editor" ? "bg-white/20 text-white shadow" : "text-zinc-400 hover:text-white"
+                className={`rounded-xl px-3 py-1 text-xs font-semibold transition ${
+                  studioView === "editor" ? "bg-white/20 text-white" : "text-zinc-400 hover:text-white"
                 }`}
               >
                 Code Editor
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setStudioView("prs");
-                  void loadPrsList(token, repo);
-                }}
-                className={`flex items-center gap-1 rounded-lg px-3 py-1 text-xs font-semibold transition ${
-                  studioView === "prs" ? "bg-white/20 text-white shadow" : "text-zinc-400 hover:text-white"
+                onClick={() => setStudioView("prs")}
+                className={`flex items-center gap-1 rounded-xl px-3 py-1 text-xs font-semibold transition ${
+                  studioView === "prs" ? "bg-white/20 text-white" : "text-zinc-400 hover:text-white"
                 }`}
               >
-                <GitPullRequest className="h-3 w-3 text-emerald-400" />
-                Pull Requests ({prs.length})
+                <GitPullRequest className="h-3 w-3" /> Pull Requests ({prs.length})
               </button>
               <button
                 type="button"
                 onClick={() => void loadReleasesList()}
-                className={`flex items-center gap-1 rounded-lg px-3 py-1 text-xs font-semibold transition ${
-                  studioView === "releases" ? "bg-white/20 text-white shadow" : "text-zinc-400 hover:text-white"
+                className={`flex items-center gap-1 rounded-xl px-3 py-1 text-xs font-semibold transition ${
+                  studioView === "releases" ? "bg-white/20 text-white" : "text-zinc-400 hover:text-white"
                 }`}
               >
-                <Tag className="h-3 w-3 text-amber-400" /> Releases
+                <Tag className="h-3 w-3" /> Releases
               </button>
             </div>
 
-            <div className="flex items-center gap-1 text-xs text-zinc-400">
-              <span className="font-mono text-zinc-300">{repo}</span>
-              <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-zinc-300">{branch}</span>
-            </div>
+            <span className="hidden text-[11px] font-mono text-zinc-400 sm:inline">
+              {repo} <span className="text-zinc-600">/</span> {branch}
+            </span>
           </div>
 
-          {/* VIEW 1: CODE EDITOR */}
+          {/* VIEW 1: MONACO CODE EDITOR */}
           {studioView === "editor" && (
-            <div className="glass-strong relative flex min-h-0 flex-1 overflow-hidden rounded-2xl shadow">
-              {/* Mobile toggle */}
-              <div className="absolute left-2 top-2 z-20 sm:hidden">
-                <button
-                  type="button"
-                  onClick={() => setShowFileExplorerMobile((prev) => !prev)}
-                  className="glass rounded-lg px-2.5 py-1 text-xs font-medium text-white shadow"
-                >
-                  {showFileExplorerMobile ? "Hide Files" : "📁 Files"}
-                </button>
-              </div>
-
-              {/* Sidebar Explorer */}
+            <div className="relative flex min-h-0 flex-1 gap-2 overflow-hidden">
+              {/* File Explorer Sidebar */}
               <div
-                className={`scroll-soft z-10 flex w-64 shrink-0 flex-col overflow-y-auto border-r border-white/10 bg-black/40 p-2 sm:static sm:flex ${
+                className={`glass-strong flex flex-col rounded-2xl shadow transition-all ${
                   showFileExplorerMobile
-                    ? "absolute inset-y-0 left-0 flex w-72 bg-[#0c0916] shadow-2xl"
-                    : "hidden sm:flex"
+                    ? "fixed inset-y-16 left-2 right-2 z-40 bg-[#0d091a] p-3"
+                    : "hidden sm:flex sm:w-64"
                 }`}
               >
-                <div className="mb-2 flex items-center justify-between px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  <span className="flex items-center gap-1.5">
-                    <FolderOpen className="h-3.5 w-3.5 text-primary" /> Explorer ({tree.length})
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowNewFileModal(true)}
-                    className="flex items-center gap-1 rounded bg-white/10 px-1.5 py-0.5 text-[10px] normal-case text-zinc-200 transition hover:bg-primary hover:text-white"
-                    title="Create New File"
-                  >
-                    <FilePlus className="h-3 w-3" /> + File
-                  </button>
+                <div className="mb-2 flex items-center justify-between gap-1 border-b border-white/10 pb-2">
+                  <span className="text-xs font-bold text-zinc-200">Files ({tree.length})</span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setShowNewFileModal(true)}
+                      className="flex items-center gap-1 rounded-lg bg-primary/20 px-2 py-0.5 text-[11px] font-semibold text-primary hover:bg-primary/30"
+                    >
+                      <FilePlus className="h-3 w-3" /> + File
+                    </button>
+                    {showFileExplorerMobile && (
+                      <button
+                        type="button"
+                        onClick={() => setShowFileExplorerMobile(false)}
+                        className="rounded-lg p-1 text-zinc-400 hover:text-white sm:hidden"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
 
-                {/* Filter */}
-                <div className="mb-2 flex items-center gap-1.5 rounded-xl border border-white/10 bg-black/30 px-2 py-1 text-xs">
-                  <Search className="h-3 w-3 text-zinc-400" />
+                <div className="relative mb-2">
+                  <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-zinc-400" />
                   <input
-                    type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Filter files..."
-                    className="w-full bg-transparent text-xs text-white outline-none placeholder:text-zinc-500"
+                    placeholder="Search files..."
+                    className="w-full rounded-xl border border-white/10 bg-black/40 py-1.5 pl-8 pr-2 text-xs text-white outline-none"
                   />
                 </div>
 
-                {/* Tree */}
-                <div className="flex flex-col gap-0.5">
-                  {filteredFlatFiles
-                    ? filteredFlatFiles.map((f) => (
+                <div className="scroll-soft min-h-0 flex-1 overflow-y-auto pr-1">
+                  {filteredFlatFiles ? (
+                    <div className="flex flex-col gap-0.5">
+                      {filteredFlatFiles.map((item) => (
                         <button
-                          key={f.path}
+                          key={item.path}
                           type="button"
-                          onClick={() => void openFile(f.path)}
+                          onClick={() => void openFile(item.path)}
                           className={`flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-xs ${
-                            current === f.path
-                              ? "bg-primary/25 font-semibold text-white"
-                              : "text-zinc-300 hover:bg-white/10"
+                            current === item.path ? "gradient-romance text-white" : "text-zinc-300 hover:bg-white/10"
                           }`}
                         >
-                          <FileCode className="h-3.5 w-3.5 shrink-0 text-primary" />
-                          <span className="truncate">{f.path}</span>
+                          <FileCode className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{item.path}</span>
                         </button>
-                      ))
-                    : folderTree.map((node) => renderTreeNode(node))}
-                  {tree.length === 0 && (
-                    <p className="px-2 py-4 text-center text-xs text-muted-foreground">
-                      No files loaded. Connect with GitHub Token.
-                    </p>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-0.5">{folderTree.map((node) => renderTreeNode(node))}</div>
                   )}
                 </div>
               </div>
 
-              {/* Monaco Editor Pane */}
-              <div className="flex min-w-0 flex-1 flex-col">
+              {/* Main Monaco Editor Canvas */}
+              <div className="glass-strong flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl shadow">
                 {/* Editor Header */}
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-black/20 px-3 py-1.5">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="truncate text-xs font-medium text-zinc-200">
+                <div className="flex items-center justify-between border-b border-white/10 bg-black/40 px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowFileExplorerMobile(true)}
+                      className="rounded-lg bg-white/10 p-1 text-xs text-zinc-300 sm:hidden"
+                    >
+                      Files
+                    </button>
+                    <span className="text-xs font-semibold text-white truncate max-w-[140px] sm:max-w-xs">
                       {current || "No file opened"}
                     </span>
                     {changed ? (
                       <span className="flex items-center gap-1 rounded-full bg-amber-400/20 px-2 py-0.5 text-[10px] font-bold text-amber-300">
                         <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                        Unsaved changes
+                        Unsaved
                       </span>
                     ) : current ? (
                       <span className="flex items-center gap-1 rounded-full bg-emerald-400/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
@@ -811,12 +837,13 @@ export function ZyraxonPanel({
                     ) : null}
                   </div>
 
+                  {/* PR Creation Header Trigger */}
                   <div className="flex items-center gap-1.5">
                     <input
                       value={prTitle}
                       onChange={(e) => setPrTitle(e.target.value)}
-                      placeholder="PR title"
-                      className="w-28 rounded-lg border border-border bg-input px-2 py-1 text-[11px] outline-none sm:w-36"
+                      placeholder={current ? `Update ${current.split("/").pop()}` : "PR title"}
+                      className="w-28 rounded-lg border border-border bg-input px-2 py-1 text-[11px] outline-none sm:w-44"
                     />
                     <button
                       type="button"
@@ -841,7 +868,10 @@ export function ZyraxonPanel({
                         defaultLanguage={langOf(current)}
                         language={langOf(current)}
                         value={code}
-                        onChange={(v) => setCode(v ?? "")}
+                        onChange={(v) => {
+                          const val = v ?? "";
+                          setCode(val);
+                        }}
                         options={{
                           minimap: { enabled: true },
                           fontSize: 14,
@@ -856,22 +886,26 @@ export function ZyraxonPanel({
                       />
                     </div>
 
-                    {/* Commit Toolbar */}
-                    <div className="flex items-center gap-2 border-t border-white/10 bg-black/30 p-2">
+                    {/* Push / Commit Toolbar */}
+                    <div className="flex items-center gap-2 border-t border-white/10 bg-black/40 p-2">
                       <input
                         value={commitMsg}
                         onChange={(e) => setCommitMsg(e.target.value)}
-                        placeholder="Commit message..."
+                        placeholder={`Commit message (default: Update ${current.split("/").pop() ?? current})`}
                         className="min-w-0 flex-1 rounded-xl border border-border bg-input px-3 py-1.5 text-xs outline-none"
                       />
                       <button
                         type="button"
                         onClick={() => void commit()}
-                        disabled={committing || !changed}
+                        disabled={committing || !current}
                         className="gradient-romance flex shrink-0 items-center gap-1.5 rounded-xl px-4 py-1.5 text-xs font-semibold text-primary-foreground shadow transition hover:opacity-90 disabled:opacity-40"
                       >
-                        {committing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                        Commit ({branch})
+                        {committing ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <UploadCloud className="h-3.5 w-3.5" />
+                        )}
+                        Push to {branch}
                       </button>
                     </div>
                   </>
