@@ -96,7 +96,10 @@ export function langOf(path: string): string {
   return map[ext] ?? "plaintext";
 }
 
-export async function ghRepo(token: string, repo: string): Promise<{ full: string; branch: string; description: string }> {
+export async function ghRepo(
+  token: string,
+  repo: string
+): Promise<{ full: string; branch: string; description: string }> {
   const res = await ok(await fetch(`${API}/repos/${repo}`, { headers: headers(token) }), "Fetch repo");
   const data = (await res.json()) as any;
   return {
@@ -138,12 +141,23 @@ export async function ghWrite(
   branch: string,
   sha?: string
 ): Promise<{ commitSha: string; newSha: string }> {
+  let fileSha = sha;
+  // If no sha provided, try to fetch the existing file's sha so commit never fails
+  if (!fileSha) {
+    try {
+      const existing = await ghFile(token, repo, path, branch);
+      fileSha = existing.sha;
+    } catch {
+      // New file creation, no sha needed
+    }
+  }
+
   const body: { message: string; content: string; branch: string; sha?: string } = {
     message,
     content: b64encode(content),
     branch,
   };
-  if (sha) body["sha"] = sha;
+  if (fileSha) body["sha"] = fileSha;
 
   const res = await ok(
     await fetch(`${API}/repos/${repo}/contents/${path}`, {
@@ -179,13 +193,49 @@ export async function ghDeleteFile(
 }
 
 export async function ghHeadSha(token: string, repo: string, branch: string): Promise<string> {
-  const url = `${API}/repos/${repo}/commits/${encodeURIComponent(branch)}?per_page=1`;
-  const res = await ok(await fetch(url, { headers: headers(token) }), "Check repo updates");
-  const data = (await res.json()) as any[];
-  return data[0]?.["sha"] ?? "";
+  // Method 1: Query git ref directly (returns commit SHA in object.sha)
+  try {
+    const refUrl = `${API}/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`;
+    const res = await fetch(refUrl, { headers: headers(token) });
+    if (res.ok) {
+      const data = (await res.json()) as any;
+      if (data?.object?.sha && data.object.sha.length >= 40) {
+        return data.object.sha;
+      }
+    }
+  } catch {}
+
+  // Method 2: Query commits list for this branch
+  try {
+    const commitsUrl = `${API}/repos/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=1`;
+    const res = await fetch(commitsUrl, { headers: headers(token) });
+    if (res.ok) {
+      const data = (await res.json()) as any;
+      if (Array.isArray(data) && data[0]?.sha && data[0].sha.length >= 40) {
+        return data[0].sha;
+      }
+    }
+  } catch {}
+
+  // Method 3: Query single commit endpoint
+  try {
+    const singleUrl = `${API}/repos/${repo}/commits/${encodeURIComponent(branch)}`;
+    const res = await fetch(singleUrl, { headers: headers(token) });
+    if (res.ok) {
+      const data = (await res.json()) as any;
+      if (data?.sha && data.sha.length >= 40) {
+        return data.sha;
+      }
+    }
+  } catch {}
+
+  return "";
 }
 
 export async function ghBranchCreate(token: string, repo: string, newBranch: string, fromSha: string): Promise<void> {
+  if (!fromSha || fromSha.length < 40) {
+    throw new Error(`Invalid base SHA (${fromSha || "empty"}). Cannot create branch.`);
+  }
   await ok(
     await fetch(`${API}/repos/${repo}/git/refs`, {
       method: "POST",
