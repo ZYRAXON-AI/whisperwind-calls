@@ -438,7 +438,13 @@ export function Conversation({
                   ) : (
                     <>
                       {m.kind === "text" && <p className="whitespace-pre-wrap break-words">{m.body}</p>}
-                      {m.kind !== "text" && <MediaBubble message={m} />}
+                      {m.kind !== "text" && (
+                        <MediaBubble
+                          kind={m.kind}
+                          path={m.media_url || ""}
+                          name={m.media_name}
+                        />
+                      )}
                     </>
                   )}
                 </div>
