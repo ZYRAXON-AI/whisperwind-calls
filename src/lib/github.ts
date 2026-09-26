@@ -21,27 +21,37 @@ async function ok(res: Response, op: string): Promise<Response> {
   return res;
 }
 
-type RepoResp = { full_name?: string; default_branch?: string; private?: boolean };
-type TreeResp = { tree?: Array<{ path?: string; type?: string; sha?: string }> };
-type FileResp = { content?: string; encoding?: string; sha?: string; size?: number };
-type CommitResp = Array<{ sha?: string }>;
-type PrResp = Array<{
-  number?: number;
-  title?: string;
-  state?: string;
-  head?: { ref?: string; sha?: string };
-  base?: { ref?: string };
-}>;
-
 export type GhPr = {
   number: number;
   title: string;
   state: string;
+  user: { login: string; avatar_url: string };
   head: { ref: string; sha: string };
   base: { ref: string };
+  merged_at: string | null;
+  comments: number;
+  created_at: string;
+  updated_at: string;
+  html_url: string;
 };
 
-export type GhTreeItem = { path: string; sha: string };
+export type GhComment = {
+  id: number;
+  user: { login: string; avatar_url: string };
+  body: string;
+  created_at: string;
+};
+
+export type GhRelease = {
+  id: number;
+  name: string;
+  tag_name: string;
+  body: string;
+  created_at: string;
+  html_url: string;
+};
+
+export type GhTreeItem = { path: string; sha: string; size?: number };
 
 export function b64encode(text: string): string {
   if (typeof btoa !== "undefined") return btoa(unescape(encodeURIComponent(text)));
@@ -86,31 +96,37 @@ export function langOf(path: string): string {
   return map[ext] ?? "plaintext";
 }
 
-export async function ghRepo(token: string, repo: string): Promise<{ full: string; branch: string }> {
+export async function ghRepo(token: string, repo: string): Promise<{ full: string; branch: string; description: string }> {
   const res = await ok(await fetch(`${API}/repos/${repo}`, { headers: headers(token) }), "Fetch repo");
-  const data = (await res.json()) as RepoResp;
+  const data = (await res.json()) as any;
   return {
     full: data["full_name"] ?? repo,
     branch: data["default_branch"] ?? "main",
+    description: data["description"] ?? "",
   };
 }
 
 export async function ghTree(token: string, repo: string, branch: string): Promise<GhTreeItem[]> {
   const url = `${API}/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`;
   const res = await ok(await fetch(url, { headers: headers(token) }), "Load repo files");
-  const data = (await res.json()) as TreeResp;
+  const data = (await res.json()) as any;
   return (data["tree"] ?? [])
-    .filter((t) => t["type"] === "blob" && t["path"])
-    .map((t) => ({ path: t["path"] as string, sha: t["sha"] ?? "" }));
+    .filter((t: any) => t["type"] === "blob" && t["path"])
+    .map((t: any) => ({ path: t["path"] as string, sha: t["sha"] ?? "", size: t["size"] }));
 }
 
-export async function ghFile(token: string, repo: string, path: string, branch: string): Promise<string> {
+export async function ghFile(
+  token: string,
+  repo: string,
+  path: string,
+  branch: string
+): Promise<{ content: string; sha: string }> {
   const url = `${API}/repos/${repo}/contents/${path}?ref=${encodeURIComponent(branch)}`;
   const res = await ok(await fetch(url, { headers: headers(token) }), "Load file");
-  const data = (await res.json()) as FileResp;
-  const content = data["content"];
-  if (!content) return "";
-  return data["encoding"] === "base64" ? b64decode(content) : content;
+  const data = (await res.json()) as any;
+  const raw = data["content"] ?? "";
+  const content = data["encoding"] === "base64" ? b64decode(raw) : raw;
+  return { content, sha: data["sha"] ?? "" };
 }
 
 export async function ghWrite(
@@ -121,13 +137,14 @@ export async function ghWrite(
   message: string,
   branch: string,
   sha?: string
-): Promise<void> {
+): Promise<{ commitSha: string; newSha: string }> {
   const body: { message: string; content: string; branch: string; sha?: string } = {
     message,
     content: b64encode(content),
     branch,
   };
   if (sha) body["sha"] = sha;
+
   const res = await ok(
     await fetch(`${API}/repos/${repo}/contents/${path}`, {
       method: "PUT",
@@ -136,18 +153,40 @@ export async function ghWrite(
     }),
     "Commit file"
   );
-  await res.json();
+  const data = (await res.json()) as any;
+  return {
+    commitSha: data["commit"]?.["sha"] ?? "",
+    newSha: data["content"]?.["sha"] ?? "",
+  };
+}
+
+export async function ghDeleteFile(
+  token: string,
+  repo: string,
+  path: string,
+  sha: string,
+  message: string,
+  branch: string
+): Promise<void> {
+  await ok(
+    await fetch(`${API}/repos/${repo}/contents/${path}`, {
+      method: "DELETE",
+      headers: { ...headers(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ message, sha, branch }),
+    }),
+    "Delete file"
+  );
 }
 
 export async function ghHeadSha(token: string, repo: string, branch: string): Promise<string> {
   const url = `${API}/repos/${repo}/commits/${encodeURIComponent(branch)}?per_page=1`;
   const res = await ok(await fetch(url, { headers: headers(token) }), "Check repo updates");
-  const data = (await res.json()) as CommitResp;
+  const data = (await res.json()) as any[];
   return data[0]?.["sha"] ?? "";
 }
 
 export async function ghBranchCreate(token: string, repo: string, newBranch: string, fromSha: string): Promise<void> {
-  const res = await ok(
+  await ok(
     await fetch(`${API}/repos/${repo}/git/refs`, {
       method: "POST",
       headers: { ...headers(token), "Content-Type": "application/json" },
@@ -155,30 +194,30 @@ export async function ghBranchCreate(token: string, repo: string, newBranch: str
     }),
     "Create branch"
   );
-  await res.json();
 }
 
-export async function ghPrs(token: string, repo: string): Promise<GhPr[]> {
+export async function ghPrs(token: string, repo: string, state: "open" | "closed" | "all" = "all"): Promise<GhPr[]> {
   const res = await ok(
-    await fetch(`${API}/repos/${repo}/pulls?state=open`, { headers: headers(token) }),
-    "Load open PRs"
+    await fetch(`${API}/repos/${repo}/pulls?state=${state}&per_page=50`, { headers: headers(token) }),
+    "Load PRs"
   );
-  const data = (await res.json()) as PrResp;
-  return data.flatMap((p) => {
-    const number = p["number"];
-    const head = p["head"];
-    const base = p["base"];
-    if (!number || !head || !base) return [];
-    return [
-      {
-        number,
-        title: p["title"] ?? `PR #${number}`,
-        state: p["state"] ?? "open",
-        head: { ref: head["ref"] ?? "", sha: head["sha"] ?? "" },
-        base: { ref: base["ref"] ?? "" },
-      },
-    ];
-  });
+  const data = (await res.json()) as any[];
+  return data.map((p) => ({
+    number: p["number"] ?? 0,
+    title: p["title"] ?? `PR #${p["number"]}`,
+    state: p["merged_at"] ? "merged" : (p["state"] ?? "open"),
+    user: {
+      login: p["user"]?.["login"] ?? "unknown",
+      avatar_url: p["user"]?.["avatar_url"] ?? "",
+    },
+    head: { ref: p["head"]?.["ref"] ?? "", sha: p["head"]?.["sha"] ?? "" },
+    base: { ref: p["base"]?.["ref"] ?? "" },
+    merged_at: p["merged_at"] ?? null,
+    comments: p["comments"] ?? 0,
+    created_at: p["created_at"] ?? "",
+    updated_at: p["updated_at"] ?? "",
+    html_url: p["html_url"] ?? `https://github.com/${repo}/pull/${p["number"]}`,
+  }));
 }
 
 export async function ghPrCreate(
@@ -188,7 +227,7 @@ export async function ghPrCreate(
   head: string,
   base: string,
   body?: string
-): Promise<void> {
+): Promise<number> {
   const payload: { title: string; head: string; base: string; body?: string } = { title, head, base };
   if (body) payload["body"] = body;
   const res = await ok(
@@ -199,17 +238,81 @@ export async function ghPrCreate(
     }),
     "Create PR"
   );
-  await res.json();
+  const data = (await res.json()) as any;
+  return data["number"] ?? 0;
 }
 
-export async function ghPrMerge(token: string, repo: string, number: number): Promise<void> {
-  const res = await ok(
+export async function ghPrMerge(
+  token: string,
+  repo: string,
+  number: number,
+  mergeMethod: "merge" | "squash" | "rebase" = "merge"
+): Promise<void> {
+  await ok(
     await fetch(`${API}/repos/${repo}/pulls/${number}/merge`, {
       method: "PUT",
       headers: { ...headers(token), "Content-Type": "application/json" },
-      body: JSON.stringify({ merge_method: "merge" }),
+      body: JSON.stringify({ merge_method: mergeMethod }),
     }),
     "Merge PR"
   );
-  await res.json();
+}
+
+export async function ghPrComments(token: string, repo: string, issueNumber: number): Promise<GhComment[]> {
+  const res = await ok(
+    await fetch(`${API}/repos/${repo}/issues/${issueNumber}/comments`, { headers: headers(token) }),
+    "Load comments"
+  );
+  const data = (await res.json()) as any[];
+  return data.map((c) => ({
+    id: c["id"],
+    user: {
+      login: c["user"]?.["login"] ?? "unknown",
+      avatar_url: c["user"]?.["avatar_url"] ?? "",
+    },
+    body: c["body"] ?? "",
+    created_at: c["created_at"] ?? "",
+  }));
+}
+
+export async function ghPrCommentAdd(
+  token: string,
+  repo: string,
+  issueNumber: number,
+  body: string
+): Promise<GhComment> {
+  const res = await ok(
+    await fetch(`${API}/repos/${repo}/issues/${issueNumber}/comments`, {
+      method: "POST",
+      headers: { ...headers(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ body }),
+    }),
+    "Post comment"
+  );
+  const c = (await res.json()) as any;
+  return {
+    id: c["id"],
+    user: {
+      login: c["user"]?.["login"] ?? "unknown",
+      avatar_url: c["user"]?.["avatar_url"] ?? "",
+    },
+    body: c["body"] ?? "",
+    created_at: c["created_at"] ?? "",
+  };
+}
+
+export async function ghReleases(token: string, repo: string): Promise<GhRelease[]> {
+  const res = await ok(
+    await fetch(`${API}/repos/${repo}/releases`, { headers: headers(token) }),
+    "Load releases"
+  );
+  const data = (await res.json()) as any[];
+  return data.map((r) => ({
+    id: r["id"],
+    name: r["name"] || r["tag_name"] || "Release",
+    tag_name: r["tag_name"] ?? "",
+    body: r["body"] ?? "",
+    created_at: r["created_at"] ?? "",
+    html_url: r["html_url"] ?? "",
+  }));
 }
