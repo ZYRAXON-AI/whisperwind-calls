@@ -10,13 +10,11 @@ import { kindOf, uploadMedia } from "@/lib/media";
 import { pushNotify } from "@/lib/push";
 import { notify, playMessageSound } from "@/lib/sounds";
 import type { Message, Profile } from "@/lib/social";
-import { Phone, PhoneIncoming, PhoneMissed, PhoneOff } from "lucide-react";
 
 function localKey(peerId: string | null, groupKey?: string) {
   return `zyraxon-messages-${groupKey ?? peerId ?? "group"}`;
 }
 
-// Same channel for both sides of a DM (sorted ids) so broadcast always crosses
 function threadChannelName(me: string, peerId: string | null, groupKey?: string) {
   if (groupKey) return `zyraxon-thread-group-${groupKey}`;
   if (!peerId) return "zyraxon-thread-group";
@@ -55,7 +53,7 @@ export function Conversation({
   activeRef.current = active;
   const onUnreadRef = useRef(onUnread);
   onUnreadRef.current = onUnread;
-  const threadKeyRef = useRef(peerId ?? "group");
+  const threadKeyRef = useRef(groupKey ?? peerId ?? "group");
   threadKeyRef.current = groupKey ?? peerId ?? "group";
 
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -74,30 +72,40 @@ export function Conversation({
   meRef.current = me;
 
   const belongsHere = useCallback(
-    (m: Message) =>
-      m.kind === "push_sub"
-        ? false
-        : groupKey
-        ? m.recipient_id === groupKey
-        : peerId
-        ? (m.sender_id === me && m.recipient_id === peerId) ||
+    (m: Message) => {
+      if (m.kind === "push_sub") return false;
+      if (groupKey) {
+        return m.recipient_id === groupKey;
+      }
+      if (peerId) {
+        return (
+          (m.sender_id === me && m.recipient_id === peerId) ||
           (m.sender_id === peerId && m.recipient_id === me)
-        : m.recipient_id === null,
+        );
+      }
+      return m.recipient_id === null;
+    },
     [me, peerId, groupKey]
   );
 
   const belongsHereRef = useRef(belongsHere);
   belongsHereRef.current = belongsHere;
 
+  // Load local cache immediately
   useEffect(() => {
     try {
       const cached = localStorage.getItem(localKey(peerId, groupKey));
-      setMessages(cached ? (JSON.parse(cached) as Message[]) : []);
+      if (cached) {
+        setMessages(JSON.parse(cached) as Message[]);
+      } else {
+        setMessages([]);
+      }
     } catch {
       setMessages([]);
     }
   }, [peerId, groupKey]);
 
+  // Fetch messages from database
   useEffect(() => {
     let alive = true;
     void (async () => {
@@ -106,16 +114,28 @@ export function Conversation({
         .select("*")
         .order("created_at", { ascending: true })
         .limit(300);
-      query = groupKey
-        ? query.eq("recipient_id", groupKey)
-        : peerId
-        ? query.or(
-            `and(sender_id.eq.${me},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${me})`
-          )
-        : query.is("recipient_id", null);
+
+      if (groupKey) {
+        query = query.eq("recipient_id", groupKey);
+      } else if (peerId) {
+        query = query.or(
+          `and(sender_id.eq.${me},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${me})`
+        );
+      } else {
+        query = query.is("recipient_id", null);
+      }
+
       const { data } = await query;
       if (alive && data) {
-        setMessages((data as Message[]).filter((m) => m.kind !== "push_sub"));
+        const list = (data as Message[]).filter((m) => m.kind !== "push_sub");
+        setMessages((prev) => {
+          const map = new Map<string, Message>();
+          prev.forEach((m) => map.set(m.id, m));
+          list.forEach((m) => map.set(m.id, m));
+          return Array.from(map.values()).sort(
+            (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+          );
+        });
       }
     })();
     return () => {
@@ -123,10 +143,13 @@ export function Conversation({
     };
   }, [me, peerId, groupKey]);
 
+  // Persist messages locally
   useEffect(() => {
-    try {
-      localStorage.setItem(localKey(peerId, groupKey), JSON.stringify(messages.slice(-200)));
-    } catch {}
+    if (messages.length > 0) {
+      try {
+        localStorage.setItem(localKey(peerId, groupKey), JSON.stringify(messages.slice(-200)));
+      } catch {}
+    }
   }, [messages, peerId, groupKey]);
 
   const handleIncoming = useCallback((msg: Message) => {
@@ -150,25 +173,27 @@ export function Conversation({
     });
   }, []);
 
-  // Realtime channel (Messages + Typing + Seen + Guest + mirror broadcast)
+  // Realtime channel
   useEffect(() => {
     const channel = supabase.channel(threadChannelName(me, peerId, groupKey));
 
     channel
       .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, (payload) => {
         if (payload.eventType === "DELETE") {
-          const old = payload.old as { id: string };
-          setMessages((prev) => prev.filter((m) => m.id !== old.id));
+          const old = payload.old as { id?: string };
+          if (old?.id) {
+            setMessages((prev) => prev.filter((m) => m.id !== old.id));
+          }
           return;
         }
         const next = payload.new as Message;
-        if (next.kind === "push_sub") return;
-        handleIncoming(next);
+        if (next && next.kind !== "push_sub") {
+          handleIncoming(next);
+        }
       })
       .on("broadcast", { event: "guest_message" }, ({ payload }) => {
         handleIncoming(payload as Message);
       })
-      // Instant mirror from the sender — works even if postgres_changes is down
       .on("broadcast", { event: "message" }, ({ payload }) => {
         handleIncoming(payload as Message);
       })
@@ -201,8 +226,6 @@ export function Conversation({
     };
   }, [handleIncoming, me, peerId, groupKey]);
 
-  // Tell the peers which message I have read — only while this thread is active,
-  // so the "seen" badge stays honest. Works for both DMs (peerId) and the group.
   useEffect(() => {
     if (!active || !messages.length || !channelRef.current) return;
     const lastMsg = messages[messages.length - 1];
@@ -215,10 +238,9 @@ export function Conversation({
     }
   }, [messages, active, me]);
 
-  // Clear the unread badge as soon as this thread is brought to the front.
   useEffect(() => {
     if (active) onUnreadRef.current?.(threadKeyRef.current, 0);
-  }, [active, peerId]);
+  }, [active, peerId, groupKey]);
 
   useEffect(() => {
     if (!active) return;
@@ -242,10 +264,12 @@ export function Conversation({
       setSending(true);
       try {
         const isGuest = profileMap[me]?.is_guest || me.includes("guest");
+        const targetRecipient = groupKey ? groupKey : (peerId ?? null);
+
         const baseMsg: Partial<Message> = {
           id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           sender_id: me,
-          recipient_id: groupKey ?? peerId,
+          recipient_id: targetRecipient,
           created_at: new Date().toISOString(),
         };
 
@@ -276,7 +300,7 @@ export function Conversation({
             .from("messages")
             .insert({
               sender_id: me,
-              recipient_id: peerId,
+              recipient_id: targetRecipient,
               kind: baseMsg.kind,
               body: baseMsg.body,
               media_url: baseMsg.media_url,
@@ -284,16 +308,18 @@ export function Conversation({
             })
             .select()
             .single();
+
           if (error) throw new Error(error.message);
           if (data) saved = data as Message;
+
           setMessages((prev) => (prev.some((m) => m.id === saved.id) ? prev : [...prev, saved]));
-          // Instant mirror so peer sees it even if postgres_changes fails
           channelRef.current?.send({
             type: "broadcast",
             event: "message",
             payload: saved,
           });
         }
+
         playMessageSound();
         if (peerId && msg.kind === "text") {
           const fromName = profileMap[me]?.display_name ?? "Whisperwind";
@@ -358,153 +384,130 @@ export function Conversation({
           const isSeenTarget =
             m.mine &&
             lastMineMsg?.id === m.id &&
-            (peerId ? peerSeenMsgId === m.id : (seenReaders[m.id]?.length ?? 0) > 0);
-          const readers = peerId
-            ? isSeenTarget && peerProfile
-              ? [peerId]
-              : []
-            : (seenReaders[m.id] ?? []).slice(0, 4);
+            (peerSeenMsgId === m.id || (seenReaders[m.id]?.length ?? 0) > 0);
 
           return (
-            <div key={m.id} className="flex flex-col">
-              <div className={`group flex gap-2 ${m.mine ? "flex-row-reverse" : ""}`}>
-                <button type="button" onClick={() => onOpenProfile(m.sender_id)} className="mt-auto">
-                  <Avatar profile={author} className="h-8 w-8" />
+            <div
+              key={m.id}
+              className={`group flex items-end gap-2 ${m.mine ? "flex-row-reverse" : "flex-row"}`}
+            >
+              {!m.mine && (
+                <button
+                  type="button"
+                  onClick={() => onOpenProfile(m.sender_id)}
+                  className="shrink-0 transition-transform active:scale-95"
+                >
+                  <Avatar profile={author} className="h-7 w-7" />
                 </button>
+              )}
 
+              <div className={`flex max-w-[80%] flex-col ${m.mine ? "items-end" : "items-start"}`}>
                 <div
-                  className={`glass max-w-[78%] rounded-3xl px-4 py-2.5 ${
-                    m.mine ? "rounded-br-lg bg-primary/20" : "rounded-bl-lg"
+                  className={`relative rounded-3xl px-4 py-2.5 text-sm shadow transition-all ${
+                    m.mine
+                      ? "gradient-romance text-primary-foreground font-medium"
+                      : "border border-white/15 bg-black/40 text-foreground"
                   }`}
                 >
-                  {!m.mine && (
-                    <p className="mb-1 text-[11px] font-medium text-primary">
-                      {author?.display_name ?? "…"}
-                    </p>
-                  )}
-
                   {editingId === m.id ? (
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-col gap-2">
                       <input
+                        type="text"
                         value={editText}
                         onChange={(e) => setEditText(e.target.value)}
-                        onKeyDown={(e) => e.key === "Enter" && void saveEdit(m.id)}
+                        className="rounded-xl border border-white/20 bg-black/50 px-2 py-1 text-sm text-white outline-none"
                         autoFocus
-                        className="min-w-0 flex-1 rounded-xl bg-input px-3 py-1.5 text-sm outline-none"
                       />
-                      <button type="button" onClick={() => void saveEdit(m.id)} aria-label="Save">
-                        <Check className="h-4 w-4 text-emerald-400" />
-                      </button>
-                      <button type="button" onClick={() => setEditingId(null)} aria-label="Cancel">
-                        <X className="h-4 w-4" />
-                      </button>
-                    </div>
-                  ) : m.kind === "call" ? (
-                    <div className="flex items-center gap-2 py-0.5 text-sm text-muted-foreground">
-                      {/missed/i.test(m.body ?? "") ? (
-                        <PhoneMissed className="h-4 w-4 shrink-0 text-red-400" />
-                      ) : /call ·/i.test(m.body ?? "") ? (
-                        <PhoneOff className="h-4 w-4 shrink-0 text-emerald-400" />
-                      ) : /started/i.test(m.body ?? "") ? (
-                        <PhoneIncoming className="h-4 w-4 shrink-0 text-primary" />
-                      ) : (
-                        <Phone className="h-4 w-4 shrink-0 text-primary" />
-                      )}
-                      <span className="whitespace-pre-wrap break-words">{m.body}</span>
-                    </div>
-                  ) : m.kind === "text" ? (
-                    <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
-                  ) : (
-                    <MediaBubble kind={m.kind} path={m.media_url ?? ""} name={m.media_name} />
-                  )}
-
-                  <div className="mt-1 flex items-center justify-end gap-2">
-                    {m.mine && editingId !== m.id && m.kind !== "call" && (
-                      <>
-                        {m.kind === "text" && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingId(m.id);
-                              setEditText(m.body ?? "");
-                            }}
-                            className="text-muted-foreground opacity-0 transition hover:text-foreground group-hover:opacity-100"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </button>
-                        )}
+                      <div className="flex items-center justify-end gap-1">
                         <button
                           type="button"
-                          onClick={() => void removeMessage(m.id)}
-                          className="text-muted-foreground opacity-0 transition hover:text-destructive group-hover:opacity-100"
+                          onClick={() => setEditingId(null)}
+                          className="rounded-lg p-1 hover:bg-white/20"
                         >
-                          <Trash2 className="h-3.5 w-3.5" />
+                          <X className="h-3.5 w-3.5" />
                         </button>
-                      </>
-                    )}
-                    <p className="text-[10px] text-muted-foreground">
-                      {m.edited_at ? "edited · " : ""}
-                      {new Date(m.created_at).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </p>
-                  </div>
+                        <button
+                          type="button"
+                          onClick={() => saveEdit(m.id)}
+                          className="rounded-lg p-1 hover:bg-white/20"
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {m.kind === "text" && <p className="whitespace-pre-wrap break-words">{m.body}</p>}
+                      {m.kind !== "text" && <MediaBubble message={m} />}
+                    </>
+                  )}
                 </div>
-              </div>
 
-              {isSeenTarget && peerProfile && peerId && (
-                <div className="mr-10 mt-1 flex items-center justify-end gap-1.5">
-                  <span className="text-[10px] text-muted-foreground">Seen</span>
-                  <div className="h-4 w-4 overflow-hidden rounded-full ring-1 ring-primary/40">
-                    <Avatar profile={peerProfile} className="h-full w-full text-[8px]" />
-                  </div>
-                </div>
-              )}
-
-              {m.mine && !peerId && readers.length > 0 && (
-                <div className="mr-10 mt-1 flex items-center justify-end gap-1">
-                  <span className="text-[10px] text-muted-foreground">
-                    {readers.length > 1 ? `Seen by ${readers.length}` : "Seen"}
+                <div className="mt-1 flex items-center gap-2 px-1 text-[10px] text-muted-foreground">
+                  <span>
+                    {new Date(m.created_at).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
                   </span>
-                  <div className="flex">
-                    {readers.map((rid) => (
+                  {m.edited_at && <span>· edited</span>}
+
+                  {m.mine && editingId !== m.id && (
+                    <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                      {m.kind === "text" && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingId(m.id);
+                            setEditText(m.body || "");
+                          }}
+                          className="hover:text-foreground"
+                        >
+                          <Pencil className="h-3 w-3" />
+                        </button>
+                      )}
                       <button
-                        key={rid}
                         type="button"
-                        onClick={() => onOpenProfile(rid)}
-                        className="-ml-1.5 h-4 w-4 overflow-hidden rounded-full ring-2 ring-background first:ml-0"
+                        onClick={() => removeMessage(m.id)}
+                        className="hover:text-destructive"
                       >
-                        <Avatar profile={profileMap[rid]} className="h-full w-full text-[8px]" />
+                        <Trash2 className="h-3 w-3" />
                       </button>
-                    ))}
-                  </div>
+                    </div>
+                  )}
                 </div>
-              )}
+
+                {/* Seen indicator */}
+                {isSeenTarget && (
+                  <div className="mt-0.5 flex items-center gap-1 self-end pr-1">
+                    {peerProfile ? (
+                      <Avatar
+                        profile={peerProfile}
+                        className="h-3.5 w-3.5 border border-white/40 ring-1 ring-primary/40"
+                      />
+                    ) : (
+                      <span className="text-[10px] text-zinc-400">Seen</span>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           );
         })}
 
         {isPeerTyping && (
-          <div className="flex items-center gap-2 pl-1">
-            {peerProfile && <Avatar profile={peerProfile} className="h-7 w-7 ring-2 ring-primary/30" />}
-            <div className="glass flex items-center gap-1.5 rounded-2xl px-3.5 py-2 shadow-sm border border-white/10">
-              <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:-0.3s]" />
-              <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:-0.15s]" />
-              <span className="h-2 w-2 rounded-full bg-primary animate-bounce" />
-              <span className="ml-1 text-[11px] font-medium text-muted-foreground">
-                {peerProfile ? `${peerProfile.display_name} is typing…` : "typing…"}
-              </span>
-            </div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground animate-pulse">
+            <span className="h-2 w-2 rounded-full bg-primary" />
+            <span>Someone is typing...</span>
           </div>
         )}
 
         <div ref={bottomRef} />
       </main>
 
-      <div className="mx-auto w-full max-w-3xl px-3 pb-3">
-        <Composer onSend={send} sending={sending} onTyping={notifyTyping} />
-      </div>
+      <footer className="border-t border-white/10 p-2 sm:p-3">
+        <Composer onSend={send} onTyping={notifyTyping} sending={sending} />
+      </footer>
     </div>
   );
 }
